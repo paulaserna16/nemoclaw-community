@@ -118,15 +118,6 @@ services:
       PGRST_DB_ANON_ROLE: "${SOURCE_ETL_POSTGRES_READER_USER:-source_etl_reader}"
       PGRST_SERVER_PORT: 3000
       PGRST_OPENAPI_MODE: follow-privileges
-    networks:
-      - default
-      - openshell
-
-networks:
-  default:
-  openshell:
-    name: "${SOURCE_ETL_OPENSHELL_NETWORK:-openshell-cluster-examples-gateway}"
-    external: true
 
 volumes:
   token-cache:

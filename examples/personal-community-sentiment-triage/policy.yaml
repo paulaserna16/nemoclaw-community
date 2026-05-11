@@ -4,6 +4,7 @@ filesystem_policy:
   read_only:
   - /usr
   - /lib
+  - /opt/hermes
   - /proc
   - /dev/urandom
   - /app
@@ -69,7 +70,10 @@ network_policies:
     binaries:
     - path: /usr/local/bin/claude
     - path: /usr/local/bin/hermes
-    - path: /usr/bin/python3.11
+    - path: /opt/hermes/.venv/bin/hermes
+    - path: /usr/bin/python3
+    - path: /usr/bin/python3.13
+    - path: /opt/hermes/.venv/bin/python
   outlook:
     name: outlook
     endpoints:
@@ -81,16 +85,26 @@ network_policies:
       - allow: { method: GET, path: "/**" }
       - allow: { method: POST, path: "/**" }
       - allow: { method: PATCH, path: "/**" }
-    - host: 172.17.0.1
+    - host: host.openshell.internal
       port: 8765
-      protocol: http
+      protocol: rest
       enforcement: enforce
+      allowed_ips:
+      - 10.0.0.0/8
+      - 172.0.0.0/8
+      - 192.168.0.0/16
+      - fc00::/7
       rules:
       - allow: { method: GET, path: /token }
     - host: host.docker.internal
       port: 8765
-      protocol: http
+      protocol: rest
       enforcement: enforce
+      allowed_ips:
+      - 10.0.0.0/8
+      - 172.0.0.0/8
+      - 192.168.0.0/16
+      - fc00::/7
       rules:
       - allow: { method: GET, path: /token }
     binaries:
@@ -98,39 +112,45 @@ network_policies:
   phoenix_collector:
     name: phoenix_collector
     endpoints:
-    - host: '172.17.0.1'
+    - host: host.openshell.internal
       port: 6006
       protocol: rest
       enforcement: enforce
+      allowed_ips:
+      - 10.0.0.0/8
+      - 172.0.0.0/8
+      - 192.168.0.0/16
+      - fc00::/7
       rules:
       - allow:
           method: POST
           path: /**
     binaries:
-    - path: /usr/bin/python3.11
-  postgres:
-    name: postgres
+    - path: /usr/bin/python3
+    - path: /usr/bin/python3.13
+    - path: /opt/hermes/.venv/bin/python
+  source_etl_api:
+    name: source_etl_api
     endpoints:
     - host: host.openshell.internal
       port: 3100
       protocol: rest
       enforcement: enforce
-      access: full
       allowed_ips:
-      - '172.17.0.1'
+      - 10.0.0.0/8
+      - 172.0.0.0/8
+      - 192.168.0.0/16
+      - fc00::/7
+      rules:
+      - allow:
+          method: GET
+          path: /**
     binaries:
-    - path: /usr/bin/python3.11
+    - path: /usr/bin/python3
+    - path: /usr/bin/python3.13
+    - path: /opt/hermes/.venv/bin/python
     - path: /usr/local/bin/hermes
-    - path: /usr/bin/curl
-  postgrest:
-    name: postgrest
-    endpoints:
-    - host: '172.19.0.3'
-      port: 3000
-      allowed_ips:
-      - '172.19.0.3'
-    binaries:
-    - path: /usr/bin/python3.11
+    - path: /opt/hermes/.venv/bin/hermes
     - path: /usr/bin/curl
   slack:
     name: slack
@@ -179,6 +199,8 @@ network_policies:
     - path: /usr/local/bin/node
     - path: /usr/bin/node
     - path: /usr/bin/python3
-    - path: /usr/bin/python3.11
+    - path: /usr/bin/python3.13
     - path: /usr/local/bin/python3
     - path: /usr/local/bin/hermes
+    - path: /opt/hermes/.venv/bin/hermes
+    - path: /opt/hermes/.venv/bin/python

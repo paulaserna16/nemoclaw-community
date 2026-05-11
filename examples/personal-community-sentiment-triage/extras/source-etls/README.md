@@ -37,13 +37,11 @@ Export the repo root `.env` before running compose. Relevant variables:
 - `SOURCE_ETL_POSTGRES_READER_USER`
 - `SOURCE_ETL_POSTGRES_READER_PASSWORD`
 - `SOURCE_ETL_API_PORT`
-- `SOURCE_ETL_OPENSHELL_NETWORK`
 - `GITHUB_TOKEN`
 
 ## Run
 
-Run this after the OpenShell gateway has created the external
-`SOURCE_ETL_OPENSHELL_NETWORK` network.
+Run this after exporting the example root `.env`.
 
 ```bash
 set -a && source .env && set +a

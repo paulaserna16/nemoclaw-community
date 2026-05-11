@@ -22,20 +22,11 @@
 #                       DESTRUCTIVE: requires Outlook re-auth and forces
 #                       ETL re-scrape on next `up`.
 #
-# `postgrest` joins the openshell-cluster-* network that OpenShell creates
-# when the gateway starts. Default tracks OPENSHELL_GATEWAY (which itself
-# defaults to examples-gateway in _lib.sh):
-# `${SOURCE_ETL_OPENSHELL_NETWORK:-openshell-cluster-examples-gateway}`. So:
-#
-#   * If you run `up` before 01-gateway.sh, postgrest is skipped with a
-#     notice. Re-run after the gateway is up to bring postgrest in.
-#   * If the openshell network is already up, all services come up.
-#
 # Try after this script:
 #   $ docker compose -f extras/docker-compose.yml ps
 #   $ curl -s http://localhost:8765/health    # token manager
 #   $ curl -s http://localhost:6006           # phoenix UI
-#   $ curl -s http://localhost:3100/          # postgrest (after gateway is up)
+#   $ curl -s http://localhost:3100/          # postgrest
 
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -62,26 +53,9 @@ EOF
 }
 
 cmd_up() {
-  load_env
-
-  # Always-on services (no openshell-network dependency).
-  SERVICES=(phoenix ms-graph-token-manager postgres github-etl forums-etl)
-
-  # Postgrest needs the openshell-cluster-* network that OpenShell creates
-  # when a sandbox is launched on the gateway. Check before including it.
-  # Export so the compose file reads the same value as this script's check.
-  export SOURCE_ETL_OPENSHELL_NETWORK="${SOURCE_ETL_OPENSHELL_NETWORK:-openshell-cluster-examples-gateway}"
-  NETWORK_NAME="$SOURCE_ETL_OPENSHELL_NETWORK"
-  if docker network inspect "$NETWORK_NAME" >/dev/null 2>&1; then
-    echo "openshell network '$NETWORK_NAME' present — including postgrest"
-    SERVICES+=(postgrest)
-  else
-    echo "openshell network '$NETWORK_NAME' not present yet — skipping postgrest."
-    echo "  After 01-gateway.sh + sandbox creation, re-run this script to bring postgrest up."
-  fi
-
-  echo "Starting host services: ${SERVICES[*]}"
-  docker compose -f "$COMPOSE_FILE" up -d --build "${SERVICES[@]}"
+  echo "Starting host services: phoenix ms-graph-token-manager postgres github-etl forums-etl postgrest"
+  docker compose -f "$COMPOSE_FILE" up -d --build \
+    phoenix ms-graph-token-manager postgres github-etl forums-etl postgrest
 
   echo
   echo "Status:"

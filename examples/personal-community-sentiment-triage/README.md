@@ -107,7 +107,7 @@ flowchart LR
 - Slack and Outlook are live connections from the sandbox; the agent can read and write both in real time.
 - Compatible-endpoint inference egress is required for the agent's LLM calls — it's not a research/data-ingestion path.
 - The ETL containers are non-agentic — fixed scraper logic on an hourly interval, no LLM involvement.
-- The PostgREST bridge exposes a read-only HTTP API on host port `3100` and internal port `3000` inside the `openshell-cluster-*` gateway Docker network, so the sandbox can reach it without live GitHub or forum egress.
+- The PostgREST bridge exposes a read-only HTTP API on host port `3100`, and the sandbox reaches it through `host.openshell.internal` without any live GitHub or forum egress.
 
 ## Agent skills
 
@@ -131,8 +131,14 @@ itself). The session UUID for Outlook gets produced *between* them, so the order
 
 ```console
 $ git clone https://github.com/NVIDIA/nemoclaw-community.git && cd examples/personal-community-sentiment-triage/
-$ curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/v0.0.36/install.sh | OPENSHELL_VERSION=v0.0.36 bash
+$ curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
 ```
+
+The package-managed installer starts a local gateway service for you. This
+example assumes that default path and targets the `openshell` gateway at
+`https://127.0.0.1:17670`. If you're following OpenShell's snap instructions
+instead, set `OPENSHELL_GATEWAY=snap-docker` and
+`OPENSHELL_GATEWAY_ENDPOINT=http://127.0.0.1:17670` in `.env`.
 
 You also need a running Docker daemon. If you haven't already, register an Azure
 application and a dedicated agent mailbox per [docs/set-up-outlook-bridge.md](docs/set-up-outlook-bridge.md)
@@ -164,13 +170,11 @@ $ bash scripts/00-host-services.sh
 
 Brings up the long-lived Docker stack from [extras/docker-compose.yml](extras/docker-compose.yml):
 phoenix (telemetry), MS Graph token manager (Outlook OAuth broker on port 8765), postgres
-(ETL backing store), and the github-etl / forums-etl workers. Postgrest is **deferred**
-until the openshell network exists — Phase 6 brings it up.
+(ETL backing store), github-etl / forums-etl workers, and PostgREST on host port 3100.
 
 These services are designed to outlive the sandbox: a `bash scripts/tear-down.sh` followed
 by another `bash scripts/bring-up.sh` does **not** require re-running this phase. Only run
-it again on a fresh checkout, after `STOP_HOST_SERVICES=1 bash scripts/tear-down.sh`, or
-in Phase 6 to attach postgrest.
+it again on a fresh checkout, or after `STOP_HOST_SERVICES=1 bash scripts/tear-down.sh`.
 
 ### Phase 4 — Obtain the Outlook session UUID
 
@@ -201,27 +205,17 @@ $ bash scripts/bring-up.sh
 ```
 
 The script auto-sources `.env`, then runs `01-gateway.sh` → `02-providers.sh` →
-`03-sandbox.sh` (start the OpenShell gateway, upsert provider credentials, build and
-launch the sandbox). When `PHOENIX_COLLECTOR_ENDPOINT` is set, this is where the
+`03-sandbox.sh` (select or register the local OpenShell gateway, upsert provider
+credentials, build and launch the sandbox). When `PHOENIX_COLLECTOR_ENDPOINT` is set, this is where the
 NeMo-Flow base variant gets selected and the endpoint baked into the image so
 OpenInference traces flow from Hermes into Phoenix at `http://localhost:6006`.
-
-### Phase 6 — Activate postgrest (only if you use the source-etl-query skill)
-
-```console
-$ bash scripts/00-host-services.sh
-```
-
-Re-running this script after the sandbox is up brings postgrest into the now-existing
-`openshell-cluster-*` network so the agent can query the ETL data via REST. Skip this
-phase if you don't need the cross-source ETL skills — the agent works without it.
 
 ## What this example owns
 
 - **Owns** (in this directory): `agents/hermes/` (the full Hermes asset tree, staged
   here for convenience), `policy.yaml` (sandbox network/filesystem policy), `extras/`,
   `.env`, and `scripts/`:
-  - `00-host-services.sh` — host-side bootstrap (Phase 3, also re-run in Phase 6 for postgrest). Independent of the sandbox lifecycle.
+  - `00-host-services.sh` — host-side bootstrap (Phase 3). Independent of the sandbox lifecycle.
   - `01-gateway.sh` / `02-providers.sh` / `03-sandbox.sh` — phase scripts called by the bring-up orchestrator.
   - `bring-up.sh` — orchestrator for 01 → 02 → 03; does **not** invoke `00-host-services.sh` (host services are long-lived).
   - `tear-down.sh` — removes the sandbox and per-sandbox providers; preserves host services unless `STOP_HOST_SERVICES=1`.
@@ -247,9 +241,9 @@ re-install of Hermes with the NeMo-Flow integration patch fetched from
 
 - Docker daemon running.
 - `openshell` CLI on PATH (installed transitively by the NemoClaw installer).
-- MS Graph token manager running on the host at port `8765`. `bring-up.sh` auto-resolves
-  the host address (Docker bridge gateway on Linux, e.g. `172.17.0.1`; `host.docker.internal`
-  fallback on macOS) — set `TOKEN_MANAGER_HOST` to override.
+- MS Graph token manager running on the host at port `8765`. `bring-up.sh` defaults
+  to `host.openshell.internal` for host-routed services; set `TOKEN_MANAGER_HOST`
+  to override.
 - `.env` populated with the credentials below.
 - **(Optional)** If your network performs TLS interception (e.g. an
   SSL-inspecting proxy), place the inspection CA certificate(s) as `.crt`
@@ -276,13 +270,13 @@ compatible-endpoint --model <NEMOCLAW_MODEL>` rather than `--provider` on sandbo
 | Var | Default | What it does |
 |---|---|---|
 | `SANDBOX_NAME` | `hermes-direct` | OpenShell sandbox name. Default avoids clobbering `nemoclaw-hermes`. |
-| `OPENSHELL_GATEWAY` | `examples-gateway` | Gateway name. The script auto-starts a gateway with this name if none is active. |
-| `OPENSHELL_GATEWAY_PORT` | `8090` | Host port for the auto-started gateway. Different from NemoClaw's default 8080 so the example gateway and `nemoclaw onboard` can coexist. |
+| `OPENSHELL_GATEWAY` | `openshell` | Gateway name. The default matches the package-managed OpenShell installer. Use `snap-docker` when following the snap setup. |
+| `OPENSHELL_GATEWAY_ENDPOINT` | auto (`https://127.0.0.1:17670` for `openshell`, `http://127.0.0.1:17670` for `snap-docker`) | Override the local gateway endpoint if you registered it under a different URL. |
 | `NEMOCLAW_MODEL` | `nvidia/nemotron-3-super-120b-a12b` | Inference model passed to `openshell inference set`. |
 | `NEMOCLAW_ENDPOINT_URL` | `https://integrate.api.nvidia.com/v1` | Upstream base URL for the `compatible-endpoint` provider. (`OPENAI_BASE_URL` is also accepted as a fallback.) |
 | `COMPATIBLE_API_KEY` | (none) | Inference API key. Mirrors NemoClaw's `REMOTE_PROVIDER_CONFIG.custom`. (`OPENAI_API_KEY` is also accepted.) |
-| `TOKEN_MANAGER_HOST` | (auto-detected: Docker bridge gateway IP, e.g. `172.17.0.1`) | Host where the MS Graph token manager is reachable from inside the sandbox. Auto-resolved via `docker network inspect bridge` to mirror NemoClaw onboard. |
-| `PHOENIX_COLLECTOR_ENDPOINT` | (none) | Set to e.g. `http://172.17.0.1:6006/v1/traces` to enable OpenInference telemetry. When set, bring-up flips `ENABLE_NEMO_FLOW=1` so the Dockerfile installs the `nemo-flow` version pinned by `NEMO_FLOW_VERSION` in the Dockerfile from PyPI and applies the Hermes integration patch (~1-2 min on first build, cached on rebuild). |
+| `TOKEN_MANAGER_HOST` | `host.openshell.internal` | Host where the MS Graph token manager is reachable from inside the sandbox. |
+| `PHOENIX_COLLECTOR_ENDPOINT` | (none) | Set to e.g. `http://host.openshell.internal:6006/v1/traces` to enable OpenInference telemetry. When set, bring-up flips `ENABLE_NEMO_FLOW=1` so the Dockerfile installs the `nemo-flow` version pinned by `NEMO_FLOW_VERSION` in the Dockerfile from PyPI and applies the Hermes integration patch (~1-2 min on first build, cached on rebuild). |
 | `DELETE_INFERENCE_PROVIDER` | `0` | If set to `1` during `tear-down.sh`, also removes the shared `compatible-endpoint` provider. |
 
 ## Verification (what success looks like)

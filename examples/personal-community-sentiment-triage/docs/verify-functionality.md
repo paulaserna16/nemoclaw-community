@@ -35,7 +35,7 @@ Run through these once before starting.
 | Check | One-liner |
 |---|---|
 | Sandbox is `Ready` | `openshell sandbox list \| grep hermes-direct` |
-| Postgrest is on the OpenShell network | `curl -sf http://localhost:3100/github_issues?limit=1` (returns JSON; `[]` is fine — first sync may be pending) |
+| Postgrest bridge is reachable | `curl -sf http://localhost:3100/github_issues?limit=1` (returns JSON; `[]` is fine — first sync may be pending) |
 | Slack works | DM `ping` to `@myuser_nemoclaw` produces a reply within ~10s. Red ❌ reaction = your Slack ID isn't in `SLACK_ALLOWED_IDS`. |
 | Outlook bridge works | Email `ping` to `OUTLOOK_TARGET_MAILBOX` from an allowed sender produces a reply within ~30s. |
 | **Optional** — unlocks Outlook Q2 | The owner of `OUTLOOK_REPLY_TO` has granted the bot delegate access in Outlook (**File → Account Settings → Delegate Access**). Without it, Graph returns `403: Cannot find row based on condition` for searches against `OUTLOOK_REPLY_TO`. |

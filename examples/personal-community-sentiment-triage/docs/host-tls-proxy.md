@@ -4,7 +4,7 @@ title:
   nav: "Host TLS proxy"
 description:
   main: "When the inference endpoint sits behind a host-side TLS terminator (corporate proxy, mkcert-issued cert, split-horizon DNS), containers in the OpenShell sandbox cannot validate the cert. scripts/host-tls-proxy.py is a small plain-HTTP forwarder that lets the sandbox reach the upstream over plain HTTP while the proxy handles TLS on the host's behalf."
-  agent: "Explains when and how to use scripts/host-tls-proxy.py to bridge the OpenShell sandbox to a host-side TLS-terminated inference endpoint. Covers the symptoms that indicate you need it, how to start it, and the matching .env settings (NEMOCLAW_ENDPOINT_URL=http://172.17.0.1:18080/v1). Use when troubleshooting TLS validation errors on inference calls or when running on hosts with corporate VPN/proxy/mkcert TLS chains the sandbox can't trust."
+  agent: "Explains when and how to use scripts/host-tls-proxy.py to bridge the OpenShell sandbox to a host-side TLS-terminated inference endpoint. Covers the symptoms that indicate you need it, how to start it, and the matching .env settings (NEMOCLAW_ENDPOINT_URL=http://host.openshell.internal:18080/v1). Use when troubleshooting TLS validation errors on inference calls or when running on hosts with corporate VPN/proxy/mkcert TLS chains the sandbox can't trust."
 keywords: ["nemoclaw tls proxy", "host tls forwarder", "openshell sandbox cert", "split-horizon dns docker", "mkcert sandbox"]
 topics: ["generative_ai", "ai_agents"]
 tags: ["hermes", "openshell", "networking", "tls", "deployment", "troubleshooting"]
@@ -42,7 +42,7 @@ sandbox  ──HTTP──>  host:18080 (host-tls-proxy.py)  ──HTTPS──>  
 
 The proxy is a thin reverse proxy:
 
-- Listens on plain HTTP on a host port (default `0.0.0.0:18080`) so the sandbox can reach it on the Docker bridge gateway IP (e.g. `172.17.0.1:18080`).
+- Listens on plain HTTP on a host port (default `0.0.0.0:18080`) so the sandbox can reach it through `host.openshell.internal` (e.g. `http://host.openshell.internal:18080`).
 - Forwards every request to the configured `--upstream` over HTTPS, using Python's default SSL context — which loads the host's installed root CAs.
 - Streams responses back unmodified (minus hop-by-hop headers).
 
@@ -80,10 +80,10 @@ Two changes:
 
 ```bash
 # Point the agent at the local proxy instead of the upstream HTTPS URL.
-NEMOCLAW_ENDPOINT_URL=http://172.17.0.1:18080/v1
+NEMOCLAW_ENDPOINT_URL=http://host.openshell.internal:18080/v1
 ```
 
-`172.17.0.1` is the default Docker bridge gateway address — the same address [scripts/_lib.sh](../scripts/_lib.sh) uses for `TOKEN_MANAGER_HOST` auto-detection. If your Docker bridge subnet is different, substitute the right address.
+`host.openshell.internal` is the stable host-routed address OpenShell exposes inside Docker-backed sandboxes for package-managed and snap-managed gateways.
 
 `COMPATIBLE_API_KEY` (or `OPENAI_API_KEY`) stays unchanged — the proxy passes the `Authorization` header straight through.
 
@@ -100,12 +100,11 @@ A `200 OK` with a model list means the proxy and upstream are both working. A `5
 After `bring-up.sh`, confirm the sandbox can reach it through the Docker bridge:
 
 ```console
-$ openshell sandbox exec hermes-direct curl -sf http://172.17.0.1:18080/v1/models | head -20
+$ openshell sandbox exec hermes-direct curl -sf http://host.openshell.internal:18080/v1/models | head -20
 ```
 
 ## Troubleshooting
 
 - **`bring-up.sh` succeeds but the agent's first inference call hangs or errors with TLS verification.** Either the proxy isn't running, or `NEMOCLAW_ENDPOINT_URL` still points at the HTTPS upstream. Run the smoke tests above to isolate.
 - **`502 Upstream inference proxy error` from the proxy.** The proxy reached the host but couldn't complete the upstream HTTPS handshake. Check that the host's trust store has the upstream's CA — the proxy uses `ssl.create_default_context()`, which honors `/etc/ssl/certs` (or the equivalent) and `SSL_CERT_FILE` / `REQUESTS_CA_BUNDLE` env vars.
-- **Sandbox can't reach `172.17.0.1:18080`.** Verify the proxy's `--listen` is `0.0.0.0` (not `127.0.0.1`) — `127.0.0.1` only accepts connections from the host's loopback, which is not the same loopback as inside the sandbox.
-- **Docker bridge isn't on `172.17.0.1`.** Run `docker network inspect bridge --format '{{(index .IPAM.Config 0).Gateway}}'` to get the actual gateway address and substitute it into `NEMOCLAW_ENDPOINT_URL`.
+- **Sandbox can't reach `host.openshell.internal:18080`.** Verify the proxy's `--listen` is `0.0.0.0` (not `127.0.0.1`) — `127.0.0.1` only accepts connections from the host's loopback, which is not the same loopback as inside the sandbox.

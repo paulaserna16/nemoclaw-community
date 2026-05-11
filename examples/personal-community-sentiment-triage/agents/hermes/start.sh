@@ -365,15 +365,14 @@ start_outlook_bridge() {
   local bridge_env
   # MS_GRAPH_SIDECAR_URL routes Graph API calls through the credential sidecar on
   # loopback (plain HTTP). The sidecar injects the live token and forwards to
-  # graph.microsoft.com over HTTPS via the decode proxy → L7 proxy chain.
-  # HTTPS_PROXY/HTTP_PROXY remain set for any other external HTTP traffic.
+  # graph.microsoft.com over HTTPS via the OpenShell proxy.
   # NO_PROXY ensures the local Hermes gateway is always reached directly.
   bridge_env="HERMES_HOME=${HERMES_WRITABLE} \
     MS_GRAPH_SIDECAR_URL=http://127.0.0.1:${SIDECAR_PORT} \
-    HTTPS_PROXY=http://127.0.0.1:${DECODE_PROXY_PORT} \
-    HTTP_PROXY=http://127.0.0.1:${DECODE_PROXY_PORT} \
-    https_proxy=http://127.0.0.1:${DECODE_PROXY_PORT} \
-    http_proxy=http://127.0.0.1:${DECODE_PROXY_PORT} \
+    HTTPS_PROXY=${_PROXY_URL} \
+    HTTP_PROXY=${_PROXY_URL} \
+    https_proxy=${_PROXY_URL} \
+    http_proxy=${_PROXY_URL} \
     NO_PROXY=localhost,127.0.0.1,::1 \
     no_proxy=localhost,127.0.0.1,::1"
   if [ "$(id -u)" -eq 0 ]; then
@@ -408,12 +407,11 @@ export NO_PROXY="$_NO_PROXY_VAL"
 export http_proxy="$_PROXY_URL"
 export https_proxy="$_PROXY_URL"
 export no_proxy="$_NO_PROXY_VAL"
-# Export Outlook channel placeholder so _has_outlook_channel detects it at
-# runtime even when NEMOCLAW_MESSAGING_CHANNELS_B64 was baked without Outlook
-# (e.g., rebuild without env sourced). The L7 proxy rewrites the placeholder at
-# egress; a non-empty value here means "provider is expected to be configured."
-export OUTLOOK_CLIENT_ID="openshell:resolve:env:OUTLOOK_CLIENT_ID"
-export OUTLOOK_SESSION_UUID="openshell:resolve:env:OUTLOOK_SESSION_UUID"
+# Preserve provider-injected placeholders from OpenShell 0.37+, which are
+# revision-scoped (openshell:resolve:env:v..._KEY). Only fall back to the legacy
+# placeholder format when nothing was injected so local/dev flows still boot.
+export OUTLOOK_CLIENT_ID="${OUTLOOK_CLIENT_ID:-openshell:resolve:env:OUTLOOK_CLIENT_ID}"
+export OUTLOOK_SESSION_UUID="${OUTLOOK_SESSION_UUID:-openshell:resolve:env:OUTLOOK_SESSION_UUID}"
 export MS_GRAPH_SIDECAR_URL="http://127.0.0.1:${SIDECAR_PORT}"
 
 # Resolve sandbox home dir early — used by install_configure_guard below.
@@ -440,8 +438,10 @@ export http_proxy="$_PROXY_URL"
 export https_proxy="$_PROXY_URL"
 export no_proxy="$_NO_PROXY_VAL"
 export HERMES_HOME="${HERMES_WRITABLE}"
-export SLACK_BOT_TOKEN="openshell:resolve:env:SLACK_BOT_TOKEN"
-export GITHUB_TOKEN="openshell:resolve:env:GITHUB_TOKEN"
+export SLACK_BOT_TOKEN="${SLACK_BOT_TOKEN:-openshell:resolve:env:SLACK_BOT_TOKEN}"
+export GITHUB_TOKEN="${GITHUB_TOKEN:-openshell:resolve:env:GITHUB_TOKEN}"
+export OUTLOOK_CLIENT_ID="${OUTLOOK_CLIENT_ID:-openshell:resolve:env:OUTLOOK_CLIENT_ID}"
+export OUTLOOK_SESSION_UUID="${OUTLOOK_SESSION_UUID:-openshell:resolve:env:OUTLOOK_SESSION_UUID}"
 export MS_GRAPH_SIDECAR_URL="http://127.0.0.1:${SIDECAR_PORT}"
 PROXYEOF
 } | emit_sandbox_sourced_file "$_PROXY_ENV_FILE"
@@ -490,13 +490,11 @@ if [ "$(id -u)" -ne 0 ]; then
   [ -n "${PHOENIX_COLLECTOR_ENDPOINT:-}" ] && PHOENIX_OPENINFERENCE_ENABLED=1
   echo "[nemo-flow] PHOENIX_OPENINFERENCE_ENABLED=${PHOENIX_OPENINFERENCE_ENABLED}" | tee -a /tmp/gateway.log >&2
 
-  start_decode_proxy
-  export NEMOCLAW_DECODE_PROXY_DEBUG=1
   HERMES_HOME="${HERMES_WRITABLE}" \
-    HTTPS_PROXY="http://127.0.0.1:${DECODE_PROXY_PORT}" \
-    HTTP_PROXY="http://127.0.0.1:${DECODE_PROXY_PORT}" \
-    https_proxy="http://127.0.0.1:${DECODE_PROXY_PORT}" \
-    http_proxy="http://127.0.0.1:${DECODE_PROXY_PORT}" \
+    HTTPS_PROXY="${_PROXY_URL}" \
+    HTTP_PROXY="${_PROXY_URL}" \
+    https_proxy="${_PROXY_URL}" \
+    http_proxy="${_PROXY_URL}" \
     HERMES_NEMO_FLOW_ENABLED="${NEMO_FLOW_ENABLED:-0}" \
     HERMES_NEMO_FLOW_ATIF_DIR="/tmp/atif" \
     HERMES_NEMO_FLOW_ACG_ENABLED="0" \
@@ -514,7 +512,6 @@ if [ "$(id -u)" -ne 0 ]; then
   # registration and the final append is a small race window (same as before
   # the shared-library refactor). Acceptable for entrypoint-level cleanup.
   SANDBOX_CHILD_PIDS=("$GATEWAY_PID")
-  [ -n "${DECODE_PROXY_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$DECODE_PROXY_PID")
   [ -n "${GATEWAY_LOG_TAIL_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$GATEWAY_LOG_TAIL_PID")
   # shellcheck disable=SC2034  # read by cleanup_on_signal from sandbox-init.sh
   SANDBOX_WAIT_PID="$GATEWAY_PID"
@@ -575,13 +572,11 @@ validate_config_symlinks "${HERMES_IMMUTABLE}" "${HERMES_WRITABLE}"
 harden_config_symlinks "${HERMES_IMMUTABLE}" "hermes"
 
 # Start the gateway as the 'gateway' user.
-start_decode_proxy
-export NEMOCLAW_DECODE_PROXY_DEBUG=1
 HERMES_HOME="${HERMES_WRITABLE}" \
-  HTTPS_PROXY="http://127.0.0.1:${DECODE_PROXY_PORT}" \
-  HTTP_PROXY="http://127.0.0.1:${DECODE_PROXY_PORT}" \
-  https_proxy="http://127.0.0.1:${DECODE_PROXY_PORT}" \
-  http_proxy="http://127.0.0.1:${DECODE_PROXY_PORT}" \
+  HTTPS_PROXY="${_PROXY_URL}" \
+  HTTP_PROXY="${_PROXY_URL}" \
+  https_proxy="${_PROXY_URL}" \
+  http_proxy="${_PROXY_URL}" \
   HERMES_NEMO_FLOW_ENABLED="${NEMO_FLOW_ENABLED:-0}" \
   HERMES_NEMO_FLOW_ATIF_DIR="/tmp/atif" \
   HERMES_NEMO_FLOW_ACG_ENABLED="0" \
@@ -599,7 +594,6 @@ start_gateway_log_stream
 # registration and the final append is a small race window (same as before
 # the shared-library refactor). Acceptable for entrypoint-level cleanup.
 SANDBOX_CHILD_PIDS=("$GATEWAY_PID")
-[ -n "${DECODE_PROXY_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$DECODE_PROXY_PID")
 [ -n "${GATEWAY_LOG_TAIL_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$GATEWAY_LOG_TAIL_PID")
 # shellcheck disable=SC2034  # read by cleanup_on_signal from sandbox-init.sh
 SANDBOX_WAIT_PID="$GATEWAY_PID"

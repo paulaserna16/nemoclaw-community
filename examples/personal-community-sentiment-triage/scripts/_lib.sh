@@ -6,12 +6,6 @@
 
 EXAMPLE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 
-# Shared, overridable knobs.
-SANDBOX_NAME="${SANDBOX_NAME:-hermes-direct}"
-GATEWAY_NAME="${OPENSHELL_GATEWAY:-examples-gateway}"
-GATEWAY_PORT="${OPENSHELL_GATEWAY_PORT:-8090}"
-SNAPSHOT_DIR="${SNAPSHOT_DIR:-$EXAMPLE_DIR/.snapshots}"
-
 # Find the most recent snapshot tarball, or print nothing if none exist.
 # Used by restore.sh when the caller doesn't pass an explicit path.
 latest_snapshot() {
@@ -32,22 +26,36 @@ load_env() {
   fi
 }
 
-# Detect the host address reachable from inside Docker containers. On Linux
-# this is the bridge gateway (typically 172.17.0.1); on Docker Desktop it's
-# host.docker.internal. Mirrors NemoClaw's detectContainerHostAddress() at
-# src/lib/onboard.ts:132 so the example behaves consistently with the
-# `nemoclaw onboard` flow under L7-proxy enforcement.
+# Auto-source .env before deriving any defaults from it.
+load_env
+
+# Shared, overridable knobs.
+SANDBOX_NAME="${SANDBOX_NAME:-hermes-direct}"
+GATEWAY_NAME="${OPENSHELL_GATEWAY:-openshell}"
+SNAPSHOT_DIR="${SNAPSHOT_DIR:-$EXAMPLE_DIR/.snapshots}"
+
+# Resolve the local gateway endpoint for the default installation paths.
+default_gateway_endpoint() {
+  if [[ -n "${OPENSHELL_GATEWAY_ENDPOINT:-}" ]]; then
+    echo "$OPENSHELL_GATEWAY_ENDPOINT"
+    return
+  fi
+
+  case "$GATEWAY_NAME" in
+    openshell)   echo "https://127.0.0.1:17670" ;;
+    snap-docker) echo "http://127.0.0.1:17670" ;;
+    *)           echo "" ;;
+  esac
+}
+
+# Default host-routed services to host.openshell.internal, which is what the
+# package-managed and snap gateways expose to Docker-backed sandboxes.
 detect_token_manager_host() {
   if [[ -n "${TOKEN_MANAGER_HOST:-}" ]]; then
-    echo "$TOKEN_MANAGER_HOST"; return
+    echo "$TOKEN_MANAGER_HOST"
+    return
   fi
-  local gw
-  gw=$(docker network inspect bridge --format '{{range .IPAM.Config}}{{.Gateway}}{{end}}' 2>/dev/null)
-  if [[ -n "$gw" && "$gw" =~ ^[0-9]+\.[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-    echo "$gw"
-  else
-    echo "host.docker.internal"
-  fi
+  echo "host.openshell.internal"
 }
 
 # Upsert a single credential on a provider. Uses `env -i` to build a clean

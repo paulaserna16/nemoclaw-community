@@ -75,6 +75,8 @@ echo "Allowed IDs: $(printf '%s' "$ALLOWED_IDS_B64" | base64 -d)"
 
 ALLOWED_SENDERS="${OUTLOOK_ALLOWED_SENDERS:-}"
 TM_HOST="$(detect_token_manager_host)"
+SOURCE_ETL_HOST="${SOURCE_ETL_API_HOST:-host.openshell.internal}"
+SOURCE_ETL_PORT="${SOURCE_ETL_API_PORT:-3100}"
 echo "Resolved TOKEN_MANAGER_HOST → $TM_HOST"
 
 # ── Stage the Dockerfile and patch ARG defaults ────────────────────────
@@ -86,6 +88,8 @@ sed -i \
   -e "s|^ARG OUTLOOK_REPLY_TO=.*|ARG OUTLOOK_REPLY_TO=$OUTLOOK_REPLY_TO|" \
   -e "s|^ARG OUTLOOK_ALLOWED_SENDERS=.*|ARG OUTLOOK_ALLOWED_SENDERS=$ALLOWED_SENDERS|" \
   -e "s|^ARG TOKEN_MANAGER_HOST=.*|ARG TOKEN_MANAGER_HOST=$TM_HOST|" \
+  -e "s|^ARG SOURCE_ETL_API_HOST=.*|ARG SOURCE_ETL_API_HOST=$SOURCE_ETL_HOST|" \
+  -e "s|^ARG SOURCE_ETL_API_PORT=.*|ARG SOURCE_ETL_API_PORT=$SOURCE_ETL_PORT|" \
   -e "s|^ARG NEMOCLAW_BUILD_ID=.*|ARG NEMOCLAW_BUILD_ID=$(date +%s)|" \
   "$STAGED_DOCKERFILE"
 

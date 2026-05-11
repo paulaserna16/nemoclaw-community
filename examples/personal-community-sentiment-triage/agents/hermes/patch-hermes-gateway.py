@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Patch Hermes gateway Slack UX inside the sandbox image."""
 
+import site
 from pathlib import Path
 
 
@@ -14,7 +15,14 @@ def replace_once(path: Path, old: str, new: str) -> None:
 
 
 def main() -> None:
-    slack_path = Path("/usr/local/lib/python3.11/dist-packages/gateway/platforms/slack.py")
+    candidates = [Path("/opt/hermes/gateway/platforms/slack.py")]
+    candidates.extend(
+        Path(base) / "gateway/platforms/slack.py" for base in site.getsitepackages()
+    )
+    slack_path = next((path for path in candidates if path.exists()), None)
+    if slack_path is None:
+        joined = ", ".join(str(path) for path in candidates)
+        raise SystemExit(f"Could not locate Hermes Slack gateway module in: {joined}")
 
     old = """        # Only react when bot is directly addressed (DM or @mention).\n        # In listen-all channels (require_mention=false), reacting to every\n        # casual message would be noisy.\n        _should_react = is_dm or is_mentioned\n\n        if _should_react:\n            await self._add_reaction(channel_id, ts, \"eyes\")\n\n        await self.handle_message(msg_event)\n\n        if _should_react:\n            await self._remove_reaction(channel_id, ts, \"eyes\")\n            await self._add_reaction(channel_id, ts, \"white_check_mark\")\n"""
 

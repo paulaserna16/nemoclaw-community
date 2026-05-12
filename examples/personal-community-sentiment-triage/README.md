@@ -131,7 +131,7 @@ itself). The session UUID for Outlook gets produced *between* them, so the order
 
 ```console
 $ git clone https://github.com/NVIDIA/nemoclaw-community.git && cd examples/personal-community-sentiment-triage/
-$ curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | sh
+$ curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION=v0.0.38 sh
 ```
 
 The package-managed installer starts a local gateway service for you. This

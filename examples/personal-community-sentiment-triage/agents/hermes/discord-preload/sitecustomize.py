@@ -249,16 +249,15 @@ if aiohttp is not None:
 
 
 # ---------------------------------------------------------------------------
-# Chain-load nemoclaw_patches (httpx transport fix + Slack catch-all command).
+# Chain-load nemoclaw_patches (httpx transport fix + Slack catch-all command
+# + NeMo-Flow session finalization).
 #
 # Python imports the first `sitecustomize` it finds on sys.path. Because
 # PYTHONPATH puts this directory before site-packages, the venv's own
-# sitecustomize (sitecustomize-nemo-flow.py) is shadowed and never runs — and
-# the standalone patches/sitecustomize.py from this example was never copied
-# into the image at all. Both gaps would mean hermes' keepalive httpx.Client
-# bypasses HTTPS_PROXY routing and can't reach inference.local. The Dockerfile
-# now installs patches/sitecustomize.py beside us as `nemoclaw_patches.py`;
-# this import triggers its module-level _patch_httpx + _patch_slack_commands.
+# sitecustomize is shadowed and never runs. The Dockerfile installs
+# patches/nemoclaw-patches.py beside us as `nemoclaw_patches.py`; this import
+# triggers its module-level _patch_httpx + _patch_slack_commands and registers
+# the NeMo-Flow meta_path hook.
 try:
     import nemoclaw_patches  # noqa: F401  side-effect import
 except Exception:

@@ -30,6 +30,6 @@ body:
     id: environment
     attributes:
       label: Environment
-      description: OS, Docker version, OpenShell version, example path, and relevant logs.
+      description: OS, Docker version, NemoClaw version, example path, and relevant logs.
     validations:
       required: true

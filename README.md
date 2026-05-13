@@ -3,24 +3,24 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](LICENSE)
 [![Security Policy](https://img.shields.io/badge/Security-Report%20a%20Vulnerability-red)](SECURITY.md)
 
-NemoClaw Community is a collection of NemoClaw examples for building constrained, inspectable agent workflows. 
+NemoClaw Community is a collection of NemoClaw examples for building constrained, inspectable agent workflows.
 
 ## What's Here
 
 | Directory | Description |
 | --------- | ----------- |
-| `examples/personal-community-sentiment-triage/` | Hermes + OpenShell example for community sentiment triage across Slack, Outlook, GitHub mirrors, and NVIDIA forum mirrors. |
-| `docs/` | Release-readiness and maintainer process notes. |
+| `examples/personal-community-sentiment-triage/` | Hermes-based NemoClaw example for community sentiment triage across Slack, Outlook, GitHub mirrors, and NVIDIA forum mirrors. |
 | `scripts/` | Repository maintenance checks used by CI. |
 
 ## Getting Started
 
-Install the OpenShell CLI and move into the example:
+The NemoClaw CLI is intended to become the stable entry point for these examples. During the current preview, each example includes local scripts that perform the lower-level runtime setup.
+
+Clone the repository and move into the example:
 
 ```bash
 git clone https://github.com/NVIDIA/nemoclaw-community.git
 cd nemoclaw-community/examples/personal-community-sentiment-triage
-curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION=v0.0.38 sh
 ```
 
 Then follow the full setup guide in [examples/personal-community-sentiment-triage/README.md](examples/personal-community-sentiment-triage/README.md).
@@ -28,7 +28,7 @@ Then follow the full setup guide in [examples/personal-community-sentiment-triag
 ## Requirements
 
 - Linux host with Docker or a compatible container runtime
-- OpenShell CLI and gateway
+- NemoClaw CLI when available, or the preview runtime prerequisites documented by each example
 - Access to an OpenAI-compatible inference endpoint
 - Optional integration credentials for Slack, Microsoft Graph/Outlook, GitHub, and source ETL mirrors
 

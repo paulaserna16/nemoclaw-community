@@ -3,11 +3,11 @@ title:
   page: "Host-side TLS proxy for inference"
   nav: "Host TLS proxy"
 description:
-  main: "When the inference endpoint sits behind a host-side TLS terminator (corporate proxy, mkcert-issued cert, split-horizon DNS), containers in the OpenShell sandbox cannot validate the cert. scripts/host-tls-proxy.py is a small plain-HTTP forwarder that lets the sandbox reach the upstream over plain HTTP while the proxy handles TLS on the host's behalf."
-  agent: "Explains when and how to use scripts/host-tls-proxy.py to bridge the OpenShell sandbox to a host-side TLS-terminated inference endpoint. Covers the symptoms that indicate you need it, how to start it, and the matching .env settings (NEMOCLAW_ENDPOINT_URL=http://host.openshell.internal:18080/v1). Use when troubleshooting TLS validation errors on inference calls or when running on hosts with corporate VPN/proxy/mkcert TLS chains the sandbox can't trust."
-keywords: ["nemoclaw tls proxy", "host tls forwarder", "openshell sandbox cert", "split-horizon dns docker", "mkcert sandbox"]
+  main: "When the inference endpoint sits behind a host-side TLS terminator (corporate proxy, mkcert-issued cert, split-horizon DNS), containers in the NemoClaw agent sandbox cannot validate the cert. scripts/host-tls-proxy.py is a small plain-HTTP forwarder that lets the sandbox reach the upstream over plain HTTP while the proxy handles TLS on the host's behalf."
+  agent: "Explains when and how to use scripts/host-tls-proxy.py to bridge the NemoClaw agent sandbox to a host-side TLS-terminated inference endpoint. Covers the symptoms that indicate you need it, how to start it, and the matching .env settings (NEMOCLAW_ENDPOINT_URL=http://host.openshell.internal:18080/v1). Use when troubleshooting TLS validation errors on inference calls or when running on hosts with corporate VPN/proxy/mkcert TLS chains the sandbox can't trust."
+keywords: ["nemoclaw tls proxy", "host tls forwarder", "nemoclaw sandbox cert", "split-horizon dns docker", "mkcert sandbox"]
 topics: ["generative_ai", "ai_agents"]
-tags: ["hermes", "openshell", "networking", "tls", "deployment", "troubleshooting"]
+tags: ["hermes", "nemoclaw", "networking", "tls", "deployment", "troubleshooting"]
 content:
   type: how_to
   difficulty: intermediate
@@ -26,7 +26,7 @@ status: published
 
 This is an **optional** path. Most readers running the example on a personal laptop or a clean cloud VM should skip it — point [NEMOCLAW_ENDPOINT_URL](../.env.example) directly at the HTTPS inference endpoint and `bring-up.sh` will work.
 
-You need this when the inference endpoint can't be reached cleanly from inside the OpenShell sandbox. Two common triggers:
+You need this when the inference endpoint can't be reached cleanly from inside the NemoClaw agent sandbox. Two common triggers:
 
 - **Corporate VPN / split-horizon DNS.** The host resolves the inference hostname to `127.0.0.1` (or some VPN-internal address), but the Docker sandbox doesn't share that resolver — it tries to reach the public address and fails or hits TLS-validation errors.
 - **Local CA / mkcert chain.** The host's TLS terminator presents a cert signed by a CA installed only on the host. Containers don't have that CA in their trust store, so TLS handshakes fail with "unable to verify the first certificate".
@@ -83,7 +83,7 @@ Two changes:
 NEMOCLAW_ENDPOINT_URL=http://host.openshell.internal:18080/v1
 ```
 
-`host.openshell.internal` is the stable host-routed address OpenShell exposes inside Docker-backed sandboxes for package-managed and snap-managed gateways.
+`host.openshell.internal` is the current stable host-routed address exposed inside Docker-backed preview sandboxes.
 
 `COMPATIBLE_API_KEY` (or `OPENAI_API_KEY`) stays unchanged — the proxy passes the `Authorization` header straight through.
 

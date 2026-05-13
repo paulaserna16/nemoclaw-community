@@ -2,10 +2,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Step 1 of 3: ensure the CLI is pointed at a running OpenShell gateway.
+# Step 1 of 3: ensure the preview runtime CLI is pointed at a running gateway.
 #
-# OpenShell 0.37+ no longer starts gateways from the CLI. The expected flow is:
-#   - install OpenShell with the package-managed installer, which starts the
+# The current runtime no longer starts gateways from the CLI. The expected flow is:
+#   - install the package-managed runtime, which starts the
 #     local gateway service for you, or
 #   - run the snap-managed gateway service
 #   - register that local endpoint with `openshell gateway add`
@@ -14,7 +14,7 @@
 # registration when present, or registers the default local endpoint for the
 # named gateway when the name is one of the documented install paths.
 #
-# Try after this script:
+# Low-level check after this script:
 #   $ openshell gateway info
 
 set -euo pipefail
@@ -41,7 +41,7 @@ else
 fi
 
 if ! openshell status >/dev/null 2>&1; then
-  echo "OpenShell gateway '$GATEWAY_NAME' is registered but not reachable." >&2
+  echo "Preview runtime gateway '$GATEWAY_NAME' is registered but not reachable." >&2
   case "$GATEWAY_NAME" in
     openshell)
       echo "For the package-managed install, verify the user service is running:" >&2

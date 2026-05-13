@@ -124,8 +124,12 @@ Skills are loaded on demand by the agent when relevant to a task. They live in [
 ## Intended user journey
 
 The bring-up has two distinct halves: a host-side bootstrap (Docker services that hold
-state across sandbox lifecycles) and an agent-side bring-up (the OpenShell sandbox
-itself). The session UUID for Outlook gets produced *between* them, so the order matters.
+state across sandbox lifecycles) and an agent-side bring-up (the NemoClaw agent
+sandbox itself). The session UUID for Outlook gets produced *between* them, so the order matters.
+
+The NemoClaw CLI is intended to become the stable entry point for this flow. Until
+that wrapper is available, the example uses local shell scripts that call the lower-level
+sandbox runtime commands for you.
 
 ### Phase 1 — Install prerequisites
 
@@ -134,11 +138,10 @@ $ git clone https://github.com/NVIDIA/nemoclaw-community.git && cd examples/pers
 $ curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION=v0.0.38 sh
 ```
 
-The package-managed installer starts a local gateway service for you. This
-example assumes that default path and targets the `openshell` gateway at
-`https://127.0.0.1:17670`. If you're following OpenShell's snap instructions
-instead, set `OPENSHELL_GATEWAY=snap-docker` and
-`OPENSHELL_GATEWAY_ENDPOINT=http://127.0.0.1:17670` in `.env`.
+For this preview, the example scripts use the OpenShell runtime directly under the
+hood. The package-managed installer starts the local gateway service the scripts
+need. If you're using a snap-based gateway instead, set `OPENSHELL_GATEWAY=snap-docker`
+and `OPENSHELL_GATEWAY_ENDPOINT=http://127.0.0.1:17670` in `.env`.
 
 On Debian/Ubuntu the installer registers `openshell-gateway` as a **systemd
 user service**, which only auto-starts when your user has an active systemd
@@ -231,8 +234,8 @@ $ bash scripts/bring-up.sh
 ```
 
 The script auto-sources `.env`, then runs `01-gateway.sh` → `02-providers.sh` →
-`03-sandbox.sh` (select or register the local OpenShell gateway, upsert provider
-credentials, build and launch the sandbox). When `PHOENIX_COLLECTOR_ENDPOINT` is set, this is where the
+`03-sandbox.sh` (select or register the local gateway, upsert provider
+credentials, build and launch the agent sandbox). When `PHOENIX_COLLECTOR_ENDPOINT` is set, this is where the
 NeMo-Flow base variant gets selected and the endpoint baked into the image so
 OpenInference traces flow from Hermes into Phoenix at `http://localhost:6006`.
 
@@ -248,8 +251,8 @@ OpenInference traces flow from Hermes into Phoenix at `http://localhost:6006`.
   - `snapshot.sh` / `restore.sh` — explicit Hermes state preservation across tear-down/bring-up cycles.
   - `host-tls-proxy.py` — optional plain-HTTP forwarder for hosts where the sandbox can't validate the inference endpoint's TLS chain (corporate VPN, split-horizon DNS, mkcert). See [docs/host-tls-proxy.md](docs/host-tls-proxy.md).
 - **Generates and discards**: a sed-patched `.Dockerfile.staged` at the example dir
-  root. OpenShell does the actual build; we patch ARG defaults beforehand because
-  `openshell sandbox create` doesn't expose `--build-arg`.
+  root. The lower-level sandbox runtime does the actual build; we patch ARG defaults
+  beforehand because the current runtime create command doesn't expose `--build-arg`.
 
 The example's Dockerfile drops the upstream `COPY nemoclaw-blueprint/` step —
 nothing in the Hermes runtime reads `/sandbox/.nemoclaw/blueprints/`, so this
@@ -266,7 +269,7 @@ re-install of Hermes with the NeMo-Flow integration patch fetched from
 ## Prerequisites
 
 - Docker daemon running.
-- `openshell` CLI on PATH (installed transitively by the NemoClaw installer).
+- Preview sandbox runtime CLI on PATH. This will be wrapped by the NemoClaw CLI.
 - MS Graph token manager running on the host at port `8765`. `bring-up.sh` defaults
   to `host.openshell.internal` for host-routed services; set `TOKEN_MANAGER_HOST`
   to override.
@@ -288,17 +291,17 @@ re-install of Hermes with the NeMo-Flow integration patch fetched from
 | `<sandbox>-github` | `github` | `GITHUB_TOKEN` (or `GH_TOKEN`) | Optional |
 
 The `compatible-endpoint` provider is **not** prefixed with the sandbox name — it's a
-shared inference provider and is consumed via `openshell inference set --provider
-compatible-endpoint --model <NEMOCLAW_MODEL>` rather than `--provider` on sandbox create.
+shared inference provider. The preview scripts bind it to the selected `NEMOCLAW_MODEL`;
+the NemoClaw CLI should own that binding once the public command surface is available.
 
 ## Configuration knobs (all env vars)
 
 | Var | Default | What it does |
 |---|---|---|
-| `SANDBOX_NAME` | `hermes-direct` | OpenShell sandbox name. Default avoids clobbering `nemoclaw-hermes`. |
-| `OPENSHELL_GATEWAY` | `openshell` | Gateway name. The default matches the package-managed OpenShell installer. Use `snap-docker` when following the snap setup. |
+| `SANDBOX_NAME` | `hermes-direct` | Agent sandbox name. Default avoids clobbering `nemoclaw-hermes`. |
+| `OPENSHELL_GATEWAY` | `openshell` | Preview runtime gateway name. The default matches the package-managed runtime installer. Use `snap-docker` when following the snap setup. |
 | `OPENSHELL_GATEWAY_ENDPOINT` | auto (`https://127.0.0.1:17670` for `openshell`, `http://127.0.0.1:17670` for `snap-docker`) | Override the local gateway endpoint if you registered it under a different URL. |
-| `NEMOCLAW_MODEL` | `nvidia/nemotron-3-super-120b-a12b` | Inference model passed to `openshell inference set`. |
+| `NEMOCLAW_MODEL` | `nvidia/nemotron-3-super-120b-a12b` | Inference model configured by the bring-up flow. |
 | `NEMOCLAW_ENDPOINT_URL` | `https://integrate.api.nvidia.com/v1` | Upstream base URL for the `compatible-endpoint` provider. (`OPENAI_BASE_URL` is also accepted as a fallback.) |
 | `COMPATIBLE_API_KEY` | (none) | Inference API key. Mirrors NemoClaw's `REMOTE_PROVIDER_CONFIG.custom`. (`OPENAI_API_KEY` is also accepted.) |
 | `TOKEN_MANAGER_HOST` | `host.openshell.internal` | Host where the MS Graph token manager is reachable from inside the sandbox. |
@@ -308,6 +311,8 @@ compatible-endpoint --model <NEMOCLAW_MODEL>` rather than `--provider` on sandbo
 ## Verification (what success looks like)
 
 The plumbing checks below confirm the bridge, sidecar, and skill scripts are wired correctly. For an end-to-end walkthrough that exercises each skill via Slack DM and Outlook email, see [docs/verify-functionality.md](docs/verify-functionality.md). For a cross-channel, multi-user demo where one user teaches the agent a new skill and a different user invokes it from a different channel after a full sandbox rebuild, see [docs/collective-wisdom.md](docs/collective-wisdom.md).
+
+These are low-level preview checks. The future NemoClaw CLI should replace most direct sandbox-runtime commands in day-to-day use.
 
 ```console
 # Source .env so $MS_GRAPH_SIDECAR_URL / $OUTLOOK_REPLY_TO are in your shell.
@@ -346,10 +351,8 @@ typically long-lived. Opt-in flags (mutually exclusive):
 - `--stop-host-services` — also stop the [extras/](extras/) stack (volumes preserved; delegates to `00-host-services.sh down`).
 - `--purge-host-services` — also stop the stack AND wipe its volumes. Forces Outlook re-auth via `authenticate.sh` and ETL re-scrape on the next `up`. Delegates to `00-host-services.sh down --volumes`.
 
-Manual cleanup for less-common operations:
-
-- `openshell gateway destroy --name examples-gateway` — destroy the gateway.
-- `openshell provider delete compatible-endpoint` — remove the shared inference provider.
+Manual cleanup for lower-level runtime state should rarely be needed; prefer the scripts
+above unless you're debugging the preview runtime directly.
 
 To stop *just* the host services without removing the sandbox:
 
@@ -370,7 +373,7 @@ What does **not** survive by default:
 
 - **Hermes's accumulated state** under `/sandbox/.hermes-data/` (memories, sessions, learned skills, scheduled cron, conversation history). The sandbox container is destroyed on tear-down; the writable layer goes with it.
 
-This example ships [scripts/snapshot.sh](scripts/snapshot.sh) and [scripts/restore.sh](scripts/restore.sh) for explicit state preservation. OpenShell's CLI does not expose a `sandbox stop`/`start` pair (the lifecycle is `create` / `delete`), so snapshot-as-tarball is the durable path.
+This example ships [scripts/snapshot.sh](scripts/snapshot.sh) and [scripts/restore.sh](scripts/restore.sh) for explicit state preservation. The current preview runtime lifecycle is create/delete rather than stop/start, so snapshot-as-tarball is the durable path.
 
 ```console
 # 1. Capture state from a running sandbox.
@@ -386,7 +389,7 @@ $ bash scripts/bring-up.sh
 # 4. Re-hydrate. Defaults to the most recent snapshot in .snapshots/.
 $ bash scripts/restore.sh
 
-# 5. Reconnect — Hermes recalls what it learned in step 1.
+# 5. Reconnect through the preview runtime shell — Hermes recalls what it learned in step 1.
 $ openshell sandbox connect hermes-direct
 ```
 

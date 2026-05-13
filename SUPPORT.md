@@ -5,7 +5,7 @@ NemoClaw Community is an example-oriented open-source repository. Support is bes
 ## Questions And Issues
 
 - Use GitHub Issues for reproducible bugs and feature requests.
-- Include your OS, Docker version, NemoClaw version, OpenShell version, example path, command output, and relevant sanitized configuration.
+- Include your OS, Docker version, NemoClaw version, example path, command output, and relevant sanitized configuration.
 - Do not include secrets, tokens, private certificates, tenant IDs, or private workspace content.
 
 ## Security

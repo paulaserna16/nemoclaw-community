@@ -13,7 +13,7 @@
 # sessions started after restore will see the prior memories, skills, and
 # session history.
 #
-# OpenShell commands you'll see:
+# Low-level runtime commands invoked by this script:
 #   - openshell sandbox upload <name> <local> <dest>
 #   - openshell sandbox exec   <name> -- <command>
 

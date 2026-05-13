@@ -297,7 +297,7 @@ GUARD
 }
 
 _has_outlook_channel() {
-  # Primary: OUTLOOK_CLIENT_ID is injected by OpenShell providers at runtime,
+  # Primary: OUTLOOK_CLIENT_ID is injected by runtime providers at startup,
   # making it a reliable signal that the Outlook channel was configured.
   # Secondary: NEMOCLAW_MESSAGING_CHANNELS_B64 (baked at build time, may not
   # be present if OpenShell doesn't forward Docker ENV vars).

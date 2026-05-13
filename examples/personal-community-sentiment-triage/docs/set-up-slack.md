@@ -4,10 +4,10 @@ title:
   nav: "Set Up Slack"
 description:
   main: "Register a Slack app from the bundled manifest, enable Socket Mode, install to your workspace, and capture the bot/app tokens used by the personal-community-sentiment-triage example."
-  agent: "Explains how Slack reaches the Hermes agent via Socket Mode (no public URL required). The Slack bot token (xoxb-) and app-level token (xapp-) are stored in OpenShell providers and resolved by the L7 proxy at request time. Slack is supported as both a messaging channel (DMs and @-mentions) and a read-only data source via skills (slack-channel-finder, slack-channel-summarizer, cross-source-gap-analysis). Use when configuring Slack integration for the agent."
+  agent: "Explains how Slack reaches the Hermes agent via Socket Mode (no public URL required). The Slack bot token (xoxb-) and app-level token (xapp-) are stored in runtime providers and resolved by the L7 proxy at request time. Slack is supported as both a messaging channel (DMs and @-mentions) and a read-only data source via skills (slack-channel-finder, slack-channel-summarizer, cross-source-gap-analysis). Use when configuring Slack integration for the agent."
 keywords: ["nemoclaw slack", "slack bot hermes agent", "slack socket mode", "slack app manifest", "slack bolt"]
 topics: ["generative_ai", "ai_agents"]
-tags: ["hermes", "openshell", "slack", "socket-mode", "deployment"]
+tags: ["hermes", "nemoclaw", "slack", "socket-mode", "deployment"]
 content:
   type: how_to
   difficulty: intermediate
@@ -118,7 +118,7 @@ $ bash scripts/bring-up.sh
 
 The script (auto-sources `.env` if needed) does the following for Slack:
 
-- Creates OpenShell providers `<sandbox>-slack-bridge` (`SLACK_BOT_TOKEN`) and `<sandbox>-slack-app` (`SLACK_APP_TOKEN`).
+- Creates runtime providers `<sandbox>-slack-bridge` (`SLACK_BOT_TOKEN`) and `<sandbox>-slack-app` (`SLACK_APP_TOKEN`).
 - Bakes `slack` into the sandbox image's channel list (`NEMOCLAW_MESSAGING_CHANNELS_B64`) alongside `outlook`.
 - Bakes `SLACK_ALLOWED_IDS` into the image's per-channel allowlist (`NEMOCLAW_MESSAGING_ALLOWED_IDS_B64`).
 - Builds the sandbox image and launches it; the Hermes Slack channel opens its Socket Mode WebSocket on startup.
@@ -139,7 +139,7 @@ $ tail -f /sandbox/.hermes/logs/hermes.log
 
 If the bot does not respond, verify that:
 
-- `openshell provider list` shows both `<sandbox>-slack-bridge` and `<sandbox>-slack-app`.
+- Low-level provider inspection shows both `<sandbox>-slack-bridge` and `<sandbox>-slack-app`.
 - Your Slack member ID matches one of the entries in `SLACK_ALLOWED_IDS` exactly (Slack IDs are case-sensitive and start with `U`).
 - The bot user is installed in your workspace (re-check **OAuth & Permissions** in your app's settings).
 - Socket Mode is still enabled (re-check **Socket Mode** in your app's settings).

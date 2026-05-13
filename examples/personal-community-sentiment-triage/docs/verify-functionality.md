@@ -7,7 +7,7 @@ description:
   agent: "End-to-end functional verification recipe for the personal-community-sentiment-triage example. Contains 10 copy-pasteable prompts (2 per skill: outlook-email-search, slack-channel-finder, slack-channel-summarizer, source-etl-query, cross-source-gap-analysis) split between Slack DM, Slack thread, and Outlook email channels. Each prompt has a stated expected behavior and a specific verification cue. Use after running scripts/bring-up.sh and confirming the README's plumbing checks pass — this guide picks up where the README's plumbing verification stops."
 keywords: ["verify nemoclaw skills", "hermes skill verification", "slack outlook smoke test", "personal community sentiment triage verification"]
 topics: ["generative_ai", "ai_agents"]
-tags: ["hermes", "openshell", "outlook", "slack", "verification", "smoke-test"]
+tags: ["hermes", "nemoclaw", "outlook", "slack", "verification", "smoke-test"]
 content:
   type: how_to
   difficulty: intermediate
@@ -27,6 +27,10 @@ status: published
 Ten copy-pasteable prompts — two per skill — that prove each skill works end-to-end across Slack and Outlook. The README's [§ Verification](../README.md#verification-what-success-looks-like) only checks plumbing (the bridge runs, the sidecar exists, scripts return `ok: true`). This guide picks up where that stops: it checks whether the **agent** can use its skills correctly.
 
 Once you've run all 10, head to [collective-wisdom.md](collective-wisdom.md) for the cross-channel skill-learning demo — where one user teaches the agent a new skill, the skill survives a full sandbox rebuild, and a different user invokes it from a different channel and gets the same output format.
+
+The NemoClaw CLI is expected to replace most direct preview-runtime checks. Until
+then, this guide uses low-level sandbox commands only for verification and
+troubleshooting.
 
 ## Prerequisites
 

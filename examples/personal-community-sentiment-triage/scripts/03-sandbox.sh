@@ -4,13 +4,13 @@
 #
 # Step 3 of 3: Build the sandbox image and create the sandbox.
 #
-# OpenShell builds the image from a Dockerfile (`openshell sandbox create
+# The preview runtime builds the image from a Dockerfile (`openshell sandbox create
 # --from <Dockerfile>`). We can't pre-build with `docker build` and then
 # pass a local-only tag — `--from` only accepts a Dockerfile path, a build
-# directory, or a registry-hosted image. OpenShell also doesn't expose a
+# directory, or a registry-hosted image. The current runtime also doesn't expose a
 # `--build-arg` passthrough, so this script sed-patches a staged copy of
 # the Dockerfile to bake in the per-run values (mailbox, channels, Phoenix
-# endpoint, etc.) before handing it to OpenShell.
+# endpoint, etc.) before handing it to the runtime.
 #
 # After create, this script re-applies the policy via `openshell policy
 # set --wait`. That's the second stage of NemoClaw's two-stage policy
@@ -18,12 +18,12 @@
 # Without this, certain rules (notably the outlook token-manager allow)
 # fail to take effect even though the YAML was loaded at create time.
 #
-# OpenShell commands you'll see:
+# Low-level runtime commands invoked by this script:
 #   - openshell sandbox create --from <Dockerfile> --policy <yaml> --provider <p> -- env … cmd
 #   - openshell sandbox list / logs / connect
 #   - openshell policy set --wait <sandbox>
 #
-# Try after this script:
+# Low-level checks after this script:
 #   $ openshell sandbox list
 #   $ openshell sandbox exec hermes-direct curl -sf http://localhost:8642/health
 #   $ openshell sandbox connect hermes-direct

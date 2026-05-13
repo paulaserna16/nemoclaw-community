@@ -5,7 +5,7 @@
 
 """Small HTTP reverse proxy for host-side TLS endpoints.
 
-For use with local OpenShell gateways that cannot validate certificates issued
+For use with local preview-runtime gateways that cannot validate certificates issued
 by the host's local CA (e.g. mkcert). The proxy listens on plain HTTP on the
 host and forwards to any HTTPS upstream using the host trust store, so
 containers reach local TLS services without needing the host CA installed.

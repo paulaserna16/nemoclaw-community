@@ -7,7 +7,7 @@ description:
   agent: "End-to-end demo for collective wisdom in the personal-community-sentiment-triage example. User A on Slack iteratively narrows a 'daily NemoClaw issue update' request, then expresses (without naming the mechanism) that they want this format to persist for future asks and for coworkers. The agent should infer that this is a candidate for a reusable skill, write SKILL.md under /sandbox/.hermes-data/skills/<agent-chosen-name>/, and reload via nemoclaw_reload_skills. Snapshot, tear down, bring up, restore — then User B on Outlook (or Slack) asks for the same kind of update via natural language and gets the identical format, proving snapshot/restore + cross-user + cross-channel persistence of learned behavior. Includes a Plan B path where a canonical SKILL.md (daily-issue-digest) is uploaded manually if the agent doesn't infer the durable mechanism."
 keywords: ["hermes collective wisdom", "agent learns skill", "snapshot restore skill", "cross channel skill recall", "multi user agent skill"]
 topics: ["generative_ai", "ai_agents"]
-tags: ["hermes", "openshell", "outlook", "slack", "skills", "collective-wisdom", "snapshot", "demo"]
+tags: ["hermes", "nemoclaw", "outlook", "slack", "skills", "collective-wisdom", "snapshot", "demo"]
 content:
   type: how_to
   difficulty: intermediate
@@ -31,6 +31,10 @@ This demo proves three durability properties of the agent in a single 15-minute 
 3. **Skills are not user-bound or channel-bound.** A different person, on a different channel, who never saw the original conversation, invokes the same skill and gets a structurally identical reply — because the skill (the file on disk), not the conversation, encodes the format.
 
 The README's [§ Persistence: collective wisdom across restarts](../README.md#persistence-collective-wisdom-across-restarts) covers the snapshot/restore mechanics in prose. This guide turns those mechanics into a reproducible end-to-end demo.
+
+The NemoClaw CLI is expected to become the stable entry point for this flow. The
+commands below use the current preview runtime directly where the wrapper does
+not exist yet.
 
 ## Prerequisites
 

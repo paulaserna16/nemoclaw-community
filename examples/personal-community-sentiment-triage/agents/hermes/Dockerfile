@@ -48,7 +48,7 @@ ENV PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT}
 # Baked at image build time using the same pattern as PHOENIX_COLLECTOR_ENDPOINT —
 # start.sh reads it as a real env var so the sidecar can open a TCP connection
 # without going through the OpenShell provider placeholder mechanism.
-# Default works with the package-managed and snap-managed OpenShell gateway
+# Default works with the package-managed and snap-managed preview gateway
 # services, which expose host-routed services at host.openshell.internal.
 ARG TOKEN_MANAGER_HOST=host.openshell.internal
 ENV TOKEN_MANAGER_HOST=${TOKEN_MANAGER_HOST}

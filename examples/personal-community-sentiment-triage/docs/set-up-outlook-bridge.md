@@ -7,7 +7,7 @@ description:
   agent: "Explains how Outlook email reaches the sandboxed Hermes agent via a Python sidecar bridge (outlook-bridge.py) that polls the Microsoft Graph API, relays message bodies to the Hermes HTTP API, and sends replies. The credential sidecar (ms_graph_sidecar.py) injects delegated OAuth tokens obtained from the MS Graph token manager running on the host. Use when setting up Outlook email integration, scheduled email jobs, or any Microsoft Graph-based messaging workflow."
 keywords: ["nemoclaw outlook", "outlook bridge hermes agent", "microsoft graph delegated auth", "msal token manager", "email agent nemoclaw"]
 topics: ["generative_ai", "ai_agents"]
-tags: ["hermes", "openshell", "outlook", "microsoft-graph", "deployment", "nemoclaw", "delegated-auth", "msal"]
+tags: ["hermes", "nemoclaw", "outlook", "microsoft-graph", "deployment", "delegated-auth", "msal"]
 content:
   type: how_to
   difficulty: intermediate
@@ -57,7 +57,7 @@ The session UUID (`OUTLOOK_SESSION_UUID`) is stored in an OpenShell provider and
 
 ## Prerequisites
 
-- A host that can run Docker and the OpenShell CLI (the same machine that will run `bash scripts/bring-up.sh`).
+- A host that can run Docker and the preview runtime CLI used by `bash scripts/bring-up.sh`.
 - An Azure Active Directory tenant with permission to register an application.
 - An admin who can grant delegated Graph API permissions (or you have that permission yourself).
 - A dedicated Entra account for the agent (for example `agt-you@nvidia.com`) — this becomes `OUTLOOK_TARGET_MAILBOX`.
@@ -204,9 +204,9 @@ $ tail -f /tmp/outlook-bridge.log
 
 If the bridge does not start, verify that:
 
-- `openshell sandbox policy` shows `graph.microsoft.com` and `login.microsoftonline.com` as allowed.
+- Low-level sandbox policy inspection shows `graph.microsoft.com` and `login.microsoftonline.com` as allowed.
 - The Azure app has **Granted** delegated permissions (not Application).
-- `openshell provider list` shows `<sandbox>-outlook` with `OUTLOOK_CLIENT_ID`, `OUTLOOK_TENANT_ID`, and `OUTLOOK_SESSION_UUID`.
+- Low-level provider inspection shows `<sandbox>-outlook` with `OUTLOOK_CLIENT_ID`, `OUTLOOK_TENANT_ID`, and `OUTLOOK_SESSION_UUID`.
 - The MS Graph token manager is running on the host and reachable at `TOKEN_MANAGER_HOST:8765`.
 
 ## Renewing the Session

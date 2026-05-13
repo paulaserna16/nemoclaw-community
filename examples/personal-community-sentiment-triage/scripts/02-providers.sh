@@ -2,7 +2,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Step 2 of 3: Upsert OpenShell providers for the credentials this sandbox
+# Step 2 of 3: Upsert runtime providers for the credentials this sandbox
 # needs.
 #
 # Providers are how secrets reach a sandbox without ever being seen by the
@@ -19,11 +19,11 @@
 #   <sandbox>-slack-app           — Slack app token
 #   <sandbox>-github              — GitHub token
 #
-# OpenShell commands you'll see:
+# Low-level runtime commands invoked by this script:
 #   - openshell provider create / update / get / list
 #   - openshell inference set    — bind a provider+model to the gateway
 #
-# Try after this script:
+# Low-level checks after this script:
 #   $ openshell provider list
 #   $ openshell provider get hermes-direct-outlook
 

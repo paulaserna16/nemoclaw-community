@@ -3,14 +3,21 @@
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue)](LICENSE)
 [![Security Policy](https://img.shields.io/badge/Security-Report%20a%20Vulnerability-red)](SECURITY.md)
 
-NemoClaw Community is a collection of NemoClaw examples for building constrained, inspectable agent workflows. 
+NemoClaw Community is a collection of examples that showcase NemoClaw blueprints for constrained, inspectable agent workflows.
+
+NemoClaw is the blueprint layer for composing three things into a repeatable agent system:
+
+- **Model** — the inference endpoint, model selection, and provider configuration the agent uses.
+- **Harness** — the agent runtime, skills, bridges, state, and workflow-specific behavior.
+- **OpenShell** — the sandbox, gateway, policy, provider, and networking substrate that runs the harness with explicit boundaries.
+
+The examples in this repository demonstrate complete blueprint patterns: they show how a model is wired to a harness, how the harness is packaged with skills and integrations, and how OpenShell constrains and runs the resulting agent.
 
 ## What's Here
 
 | Directory | Description |
 | --------- | ----------- |
-| `examples/personal-community-sentiment-triage/` | Hermes + OpenShell example for community sentiment triage across Slack, Outlook, GitHub mirrors, and NVIDIA forum mirrors. |
-| `docs/` | Release-readiness and maintainer process notes. |
+| `examples/personal-community-sentiment-triage/` | NemoClaw blueprint example pairing a Hermes harness with an OpenShell sandbox and community-signal integrations across Slack, Outlook, GitHub mirrors, and NVIDIA forum mirrors. |
 | `scripts/` | Repository maintenance checks used by CI. |
 
 ## Getting Started

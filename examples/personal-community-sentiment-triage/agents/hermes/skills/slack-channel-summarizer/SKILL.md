@@ -45,11 +45,11 @@ Interpret the result this way:
 
 ### 2. Read channel history
 
-Use `conversations.history` with the resolved channel ID:
+Use the bundled history helper with the resolved channel ID:
 
 ```bash
-curl -s "https://api.slack.com/api/conversations.history?channel=CHANNEL_ID&limit=15" \
-  -H "Authorization: Bearer openshell:resolve:env:SLACK_BOT_TOKEN"
+/usr/bin/python3 /sandbox/.hermes-data/skills/slack-channel-summarizer/scripts/read_slack_channel_history.py \
+  --channel-id CHANNEL_ID --limit 15
 ```
 
 If needed, add `oldest=` and `latest=` to constrain the time range.

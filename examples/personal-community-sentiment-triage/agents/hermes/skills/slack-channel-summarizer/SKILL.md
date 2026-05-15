@@ -18,28 +18,44 @@ Use this skill to resolve a Slack channel and read its history.
 - The best way to access slack given the sandbox is through the provided python scripts.
 - Direct curl requests, or Python scripts, are unlikely to succeed
 - The SLACK_BOT_TOKEN contains a placeholder env var that is resolved by the sandbox on egress
+- Only refer to helper scripts that actually exist in this sandbox image
 
 
 ## Procedure
 
 ### 1. Resolve the channel ID
 
-
 If the user gives a direct Slack mention like `<#C0ALN454EH4>`, use that ID
 directly.
 
-Otherwise, use your slack channel finder skill!
+If the request comes from a tagged Slack channel and the runtime context already
+gives you the current channel ID, treat that as the resolved channel ID for
+phrases like "this channel".
+
+Otherwise, use your slack channel finder skill.
 
 ### 2. Read channel history
 
-Use the bundled history helper with the resolved channel ID:
+Use the existing channel-description helper with the resolved channel ID. It
+includes recent human messages and channel metadata that are sufficient for a
+summary:
 
 ```bash
-/usr/bin/python3 /sandbox/.hermes-data/skills/slack-channel-summarizer/scripts/read_slack_channel_history.py \
-  --channel-id CHANNEL_ID --limit 15
+/usr/bin/python3 /sandbox/.hermes-data/skills/slack-channel-finder/scripts/describe_slack_channel.py \
+  --channel-id CHANNEL_ID --history-limit 15
 ```
 
-If needed, add `oldest=` and `latest=` to constrain the time range.
+Useful variants:
+
+```bash
+/usr/bin/python3 /sandbox/.hermes-data/skills/slack-channel-finder/scripts/describe_slack_channel.py \
+  --channel-id CHANNEL_ID --history-limit 30 --replies
+```
+
+```bash
+/usr/bin/python3 /sandbox/.hermes-data/skills/slack-channel-finder/scripts/describe_slack_channel.py \
+  --channel-id CHANNEL_ID --history-limit 15 --resolve-users
+```
 
 Interpret common failures explicitly:
 
@@ -60,4 +76,3 @@ Summarize only what the user asked for. Good defaults are:
 - main topics
 - active participants
 - decisions or action items
-

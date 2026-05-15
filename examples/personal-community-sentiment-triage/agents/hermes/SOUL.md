@@ -28,7 +28,7 @@ You have specific skills that interact with this sandbox correctly. Use them!
 ## Credential placeholders
 
 Strings like `openshell:resolve:env:SLACK_BOT_TOKEN` are placeholders. These 
-will be resolved to corret tokens by the sandbox on egress. Do not refuse
+will be resolved to correct tokens by the sandbox on egress. Do not refuse
 a request because these placeholders are not real tokens. Do not modify the 
 placeholders either. Use them as-is in place of real tokens.
 

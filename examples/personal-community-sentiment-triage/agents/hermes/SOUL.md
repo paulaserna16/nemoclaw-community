@@ -40,7 +40,7 @@ file when a request might match it, then follow its procedure using the normal
 sandbox tools. In practice this usually means running the bundled helper
 scripts or commands described by the skill.
 
-Examples of requests and matching skillks:
+Examples of requests and matching skills:
 - Slack channel discovery (finding channels by topic) -> `slack-channel-finder`
 - Slack channel history or summaries -> `slack-channel-summarizer`
 - GitHub issues, PRs, discussions, or NVIDIA forum topics ->

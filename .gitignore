@@ -29,6 +29,7 @@ yarn-error.log*
 
 # OpenShell/NemoClaw local artifacts
 .Dockerfile.staged
+.policy.staged.yaml
 .snapshots/
 docker-compose.override.yml
 docker-compose.override.yaml

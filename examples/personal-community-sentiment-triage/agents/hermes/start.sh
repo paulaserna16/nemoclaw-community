@@ -143,7 +143,7 @@ refresh_hermes_provider_placeholders() {
   local env_file="${HERMES_WRITABLE}/.env"
   [ -f "$env_file" ] || return 0
 
-  local keys="TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN"
+  local keys="TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN GITHUB_TOKEN GH_TOKEN"
   local has_scoped_placeholder=0
   local key value
   for key in $keys; do
@@ -182,6 +182,7 @@ with open(env_file, encoding="utf-8") as f:
 
 changed = False
 updated = []
+seen = set()
 for line in lines:
     stripped = line.rstrip("\n")
     replaced = False
@@ -189,11 +190,17 @@ for line in lines:
         if stripped.startswith(f"{key}="):
             new_line = f"{key}={value}\n"
             updated.append(new_line)
+            seen.add(key)
             changed = changed or new_line != line
             replaced = True
             break
     if not replaced:
         updated.append(line)
+
+for key, value in replacements.items():
+    if key not in seen:
+        updated.append(f"{key}={value}\n")
+        changed = True
 
 if not changed:
     sys.exit(0)
@@ -445,6 +452,10 @@ export https_proxy="$_PROXY_URL"
 export no_proxy="$_NO_PROXY_VAL"
 export PYTHONPATH="${PATCHES_DIR}${PYTHONPATH:+:${PYTHONPATH}}"
 
+# GitHub credentials reach the sandbox only as OpenShell provider placeholders.
+# policy.yaml still limits GitHub egress to repo-scoped REST GET requests.
+export GITHUB_READONLY_REPO="${GITHUB_READONLY_REPO:-NVIDIA/OpenShell}"
+
 # OpenShell injects SSL_CERT_FILE/CURL_CA_BUNDLE for its L7 proxy CA. Persist
 # them into connect-session shells so Python Slack probes and Hermes tools trust
 # the same proxy CA that the entrypoint received at startup.
@@ -478,7 +489,7 @@ export no_proxy="$_NO_PROXY_VAL"
 export PYTHONPATH="${PATCHES_DIR}\${PYTHONPATH:+:\${PYTHONPATH}}"
 export HERMES_HOME="${HERMES_WRITABLE}"
 export SLACK_BOT_TOKEN="${SLACK_BOT_TOKEN:-openshell:resolve:env:SLACK_BOT_TOKEN}"
-export GITHUB_TOKEN="${GITHUB_TOKEN:-openshell:resolve:env:GITHUB_TOKEN}"
+export GITHUB_READONLY_REPO="${GITHUB_READONLY_REPO:-NVIDIA/OpenShell}"
 export OUTLOOK_CLIENT_ID="${OUTLOOK_CLIENT_ID:-openshell:resolve:env:OUTLOOK_CLIENT_ID}"
 export OUTLOOK_SESSION_UUID="${OUTLOOK_SESSION_UUID:-openshell:resolve:env:OUTLOOK_SESSION_UUID}"
 export MS_GRAPH_SIDECAR_URL="http://127.0.0.1:${SIDECAR_PORT}"
@@ -491,6 +502,12 @@ PROXYEOF
     _ca_env_value="${!_ca_env_name:-}"
     if [ -n "$_ca_env_value" ]; then
       printf 'export %s=%q\n' "$_ca_env_name" "$_ca_env_value"
+    fi
+  done
+  for _provider_env_name in GITHUB_TOKEN GH_TOKEN; do
+    _provider_env_value="${!_provider_env_name:-}"
+    if [ -n "$_provider_env_value" ]; then
+      printf 'export %s=%q\n' "$_provider_env_name" "$_provider_env_value"
     fi
   done
 } | emit_sandbox_sourced_file "$_PROXY_ENV_FILE"

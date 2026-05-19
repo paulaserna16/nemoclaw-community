@@ -60,7 +60,8 @@ fi
 command -v openshell >/dev/null || { echo "openshell not in PATH" >&2; exit 1; }
 
 STAGED_DOCKERFILE="$EXAMPLE_DIR/.Dockerfile.staged"
-trap 'rm -f "$STAGED_DOCKERFILE"' EXIT
+STAGED_POLICY="$EXAMPLE_DIR/.policy.staged.yaml"
+trap 'rm -f "$STAGED_DOCKERFILE" "$STAGED_POLICY"' EXIT
 
 # ── Build CHANNELS_B64 and ALLOWED_IDS_B64 ─────────────────────────────
 # These two base64-JSON blobs tell the Hermes config generator which
@@ -94,7 +95,13 @@ ALLOWED_SENDERS="${OUTLOOK_ALLOWED_SENDERS:-}"
 TM_HOST="$(detect_token_manager_host)"
 SOURCE_ETL_HOST="${SOURCE_ETL_API_HOST:-host.openshell.internal}"
 SOURCE_ETL_PORT="${SOURCE_ETL_API_PORT:-3100}"
+GITHUB_READONLY_REPO="${GITHUB_READONLY_REPO:-NVIDIA/OpenShell}"
+if [[ ! "$GITHUB_READONLY_REPO" =~ ^[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9._-]+$ ]]; then
+  echo "Invalid GITHUB_READONLY_REPO '$GITHUB_READONLY_REPO' — expected owner/repo" >&2
+  exit 1
+fi
 echo "Resolved TOKEN_MANAGER_HOST → $TM_HOST"
+echo "GitHub read-only repo scope: $GITHUB_READONLY_REPO"
 
 # ── Stage the Dockerfile and patch ARG defaults ────────────────────────
 cp "$EXAMPLE_DIR/agents/hermes/Dockerfile" "$STAGED_DOCKERFILE"
@@ -104,6 +111,7 @@ sed -i \
   -e "s|^ARG OUTLOOK_TARGET_MAILBOX=.*|ARG OUTLOOK_TARGET_MAILBOX=${OUTLOOK_TARGET_MAILBOX:-}|" \
   -e "s|^ARG OUTLOOK_REPLY_TO=.*|ARG OUTLOOK_REPLY_TO=${OUTLOOK_REPLY_TO:-}|" \
   -e "s|^ARG OUTLOOK_ALLOWED_SENDERS=.*|ARG OUTLOOK_ALLOWED_SENDERS=$ALLOWED_SENDERS|" \
+  -e "s|^ARG GITHUB_READONLY_REPO=.*|ARG GITHUB_READONLY_REPO=$GITHUB_READONLY_REPO|" \
   -e "s|^ARG TOKEN_MANAGER_HOST=.*|ARG TOKEN_MANAGER_HOST=$TM_HOST|" \
   -e "s|^ARG SOURCE_ETL_API_HOST=.*|ARG SOURCE_ETL_API_HOST=$SOURCE_ETL_HOST|" \
   -e "s|^ARG SOURCE_ETL_API_PORT=.*|ARG SOURCE_ETL_API_PORT=$SOURCE_ETL_PORT|" \
@@ -132,6 +140,12 @@ if [[ -n "${PHOENIX_COLLECTOR_ENDPOINT:-}" ]]; then
     "$STAGED_DOCKERFILE"
 fi
 
+# ── Stage policy and patch per-run repo scope ───────────────────────────
+cp "$EXAMPLE_DIR/policy.yaml" "$STAGED_POLICY"
+sed -i \
+  -e "s|__GITHUB_READONLY_REPO__|$GITHUB_READONLY_REPO|g" \
+  "$STAGED_POLICY"
+
 # ── Build provider flags from what 02-providers.sh actually created ────
 PROVIDER_FLAGS=()
 [[ -n "${OUTLOOK_CLIENT_ID:-}" ]] && PROVIDER_FLAGS+=(--provider "$SANDBOX_NAME-outlook")
@@ -159,13 +173,14 @@ echo "Creating sandbox $SANDBOX_NAME (OpenShell will build the image)…"
 setsid openshell sandbox create \
   --from "$STAGED_DOCKERFILE" \
   --name "$SANDBOX_NAME" \
-  --policy "$EXAMPLE_DIR/policy.yaml" \
+  --policy "$STAGED_POLICY" \
   "${PROVIDER_FLAGS[@]}" \
   -- env \
     OUTLOOK_TARGET_MAILBOX="${OUTLOOK_TARGET_MAILBOX:-}" \
     OUTLOOK_REPLY_TO="${OUTLOOK_REPLY_TO:-}" \
     OUTLOOK_ALLOWED_SENDERS="$ALLOWED_SENDERS" \
     TOKEN_MANAGER_HOST="$TM_HOST" \
+    GITHUB_READONLY_REPO="$GITHUB_READONLY_REPO" \
     NEMOCLAW_MESSAGING_CHANNELS_B64="$CHANNELS_B64" \
     CHAT_UI_URL="http://127.0.0.1:8642" \
     PHOENIX_COLLECTOR_ENDPOINT="${PHOENIX_COLLECTOR_ENDPOINT:-}" \
@@ -212,10 +227,10 @@ fi
 echo "  Sandbox reported ready; detached local create stream."
 
 # ── Re-apply policy (matches nemoclaw onboard's two-stage flow) ────────
-# Without this, network rules from policy.yaml may not be activated even
+# Without this, network rules from the staged policy may not be activated even
 # though they were passed at create time. Symptom: L7 proxy denies outlook
 # token-manager requests with `[policy:outlook]` despite a matching rule.
 echo "Re-applying policy via 'openshell policy set --wait' (stage 2)"
-openshell policy set --policy "$EXAMPLE_DIR/policy.yaml" --wait "$SANDBOX_NAME"
+openshell policy set --policy "$STAGED_POLICY" --wait "$SANDBOX_NAME"
 
 echo "Sandbox $SANDBOX_NAME is ready."

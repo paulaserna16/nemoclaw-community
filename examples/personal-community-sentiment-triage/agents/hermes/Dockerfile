@@ -97,8 +97,9 @@ RUN adduser --disabled-password --gecos "" --uid 1001 ms-graph-proxy
 COPY certs/ /usr/local/share/ca-certificates/
 RUN update-ca-certificates
 
-# Install GitHub CLI (gh) — not in the base image.
-# GH_TOKEN is set below so gh authenticates via the OpenShell provider pipeline.
+# Install GitHub CLI (gh) — not in the base image. It is not allowed in the
+# GitHub network policy by default, so live GitHub reads use the bundled
+# curl/Python-safe helper with the OpenShell provider placeholder.
 RUN mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://cli.github.com/packages/githubcli-archive-keyring.gpg \
        -o /etc/apt/keyrings/githubcli-archive-keyring.gpg \
@@ -316,6 +317,7 @@ ARG NEMOCLAW_MESSAGING_ALLOWED_IDS_B64=e30=
 ARG OUTLOOK_TARGET_MAILBOX=
 ARG OUTLOOK_REPLY_TO=
 ARG OUTLOOK_ALLOWED_SENDERS=
+ARG GITHUB_READONLY_REPO=NVIDIA/OpenShell
 ARG SOURCE_ETL_GITHUB_REPO=
 ARG SOURCE_ETL_FORUM_TAG=
 ARG SOURCE_ETL_API_URL=
@@ -334,6 +336,7 @@ ENV NEMOCLAW_MODEL=${NEMOCLAW_MODEL} \
     OUTLOOK_TARGET_MAILBOX=${OUTLOOK_TARGET_MAILBOX} \
     OUTLOOK_REPLY_TO=${OUTLOOK_REPLY_TO} \
     OUTLOOK_ALLOWED_SENDERS=${OUTLOOK_ALLOWED_SENDERS} \
+    GITHUB_READONLY_REPO=${GITHUB_READONLY_REPO} \
     MS_GRAPH_SERVICES=${MS_GRAPH_SERVICES} \
     SOURCE_ETL_GITHUB_REPO=${SOURCE_ETL_GITHUB_REPO} \
     SOURCE_ETL_FORUM_TAG=${SOURCE_ETL_FORUM_TAG} \

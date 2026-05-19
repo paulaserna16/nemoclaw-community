@@ -17,7 +17,7 @@
 #   <sandbox>-outlook             — Outlook (3 credentials)
 #   <sandbox>-slack-bridge        — Slack bot token
 #   <sandbox>-slack-app           — Slack app token
-#   <sandbox>-github              — GitHub token
+#   <sandbox>-github              — GitHub token placeholder
 #
 # OpenShell commands you'll see:
 #   - openshell provider create / update / get / list
@@ -107,6 +107,9 @@ if [[ -n "${SLACK_APP_TOKEN:-}" ]]; then
 fi
 
 # ── GitHub provider ─────────────────────────────────────────────────────
+# GitHub access is authenticated to avoid public unauthenticated rate limits,
+# but the sandbox receives only an OpenShell placeholder. policy.yaml still
+# restricts live GitHub egress to repo-scoped REST GET requests from curl/Python.
 if [[ -n "${GITHUB_TOKEN:-}" || -n "${GH_TOKEN:-}" ]]; then
   GH_PROVIDER="$SANDBOX_NAME-github"
   if [[ -n "${GITHUB_TOKEN:-}" ]]; then

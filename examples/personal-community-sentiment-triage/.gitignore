@@ -4,6 +4,7 @@
 # and removed by the trap on exit. Listed here so an interrupted build can't
 # accidentally check it in.
 .Dockerfile.staged
+.policy.staged.yaml
 
 # Snapshot tarballs from scripts/snapshot.sh. Demo artifacts — local only.
 .snapshots/

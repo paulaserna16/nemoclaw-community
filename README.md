@@ -17,7 +17,7 @@ The examples in this repository demonstrate complete blueprint patterns: they sh
 
 | Directory | Description |
 | --------- | ----------- |
-| `examples/personal-community-sentiment-triage/` | NemoClaw blueprint example pairing a Hermes harness with an OpenShell sandbox and community-signal integrations across Slack, Outlook, GitHub mirrors, and NVIDIA forum mirrors. |
+| `examples/personal-community-sentiment-triage/` | NemoClaw blueprint example pairing a Hermes harness with an OpenShell sandbox and community-signal integrations across Slack, Outlook, live read-only GitHub REST, GitHub discussion mirrors, and NVIDIA forum mirrors. |
 | `scripts/` | Repository maintenance checks used by CI. |
 
 ## Getting Started
@@ -37,7 +37,7 @@ Then follow the full setup guide in [examples/personal-community-sentiment-triag
 - Linux host with Docker or a compatible container runtime
 - OpenShell CLI and gateway
 - Access to an OpenAI-compatible inference endpoint
-- Optional integration credentials for Slack, Microsoft Graph/Outlook, GitHub, and source ETL mirrors
+- Optional integration credentials for Slack, Microsoft Graph/Outlook, GitHub live reads, and source ETL mirrors
 
 This project will download and install additional third-party open source software projects. Review the license terms of these open source projects before use. See [THIRD-PARTY-NOTICES](THIRD-PARTY-NOTICES) for the repository inventory.
 

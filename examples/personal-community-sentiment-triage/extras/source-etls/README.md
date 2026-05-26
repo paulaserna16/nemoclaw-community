@@ -14,6 +14,11 @@ directly.
 - initial backfill: 72 hours
 - recurring refresh: hourly
 
+The GitHub repo above is the host-side mirror scope, controlled by
+`SOURCE_ETL_GITHUB_REPO`. It is separate from the sandbox's live read-only
+GitHub scope, which is controlled by `GITHUB_READONLY_REPO` and applied through
+OpenShell policy during sandbox creation.
+
 ## Services
 
 - `postgres`: shared sink and ETL metadata store

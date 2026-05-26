@@ -3,8 +3,8 @@ title:
   page: "Verify Skill Functionality"
   nav: "Verify Skills"
 description:
-  main: "Walk through 10 conversational prompts (2 per skill) that prove each Hermes skill works end-to-end across Slack DM, Slack thread, and Outlook email channels."
-  agent: "End-to-end functional verification recipe for the personal-community-sentiment-triage example. Contains 10 copy-pasteable prompts (2 per skill: outlook-email-search, slack-channel-finder, slack-channel-summarizer, source-etl-query, cross-source-gap-analysis) split between Slack DM, Slack thread, and Outlook email channels. Each prompt has a stated expected behavior and a specific verification cue. Use after running scripts/bring-up.sh and confirming the README's plumbing checks pass — this guide picks up where the README's plumbing verification stops."
+  main: "Walk through 10 conversational prompts plus a live GitHub check that prove the core Hermes workflow skills end-to-end across Slack DM, Slack thread, and Outlook email channels."
+  agent: "End-to-end functional verification recipe for the personal-community-sentiment-triage example. Contains 10 copy-pasteable prompts covering outlook-email-search, slack-channel-finder, slack-channel-summarizer, source-etl-query, and cross-source-gap-analysis, plus a live github-readonly-live check. Each prompt has a stated expected behavior and a specific verification cue. Use after running scripts/bring-up.sh and confirming the README's plumbing checks pass — this guide picks up where the README's plumbing verification stops."
 keywords: ["verify nemoclaw skills", "hermes skill verification", "slack outlook smoke test", "personal community sentiment triage verification"]
 topics: ["generative_ai", "ai_agents"]
 tags: ["hermes", "openshell", "outlook", "slack", "verification", "smoke-test"]
@@ -24,7 +24,7 @@ status: published
 
 # Verify Skill Functionality
 
-Ten copy-pasteable prompts — two per skill — that prove each skill works end-to-end across Slack and Outlook. The README's [§ Verification](../README.md#verification-what-success-looks-like) only checks plumbing (the bridge runs, the sidecar exists, scripts return `ok: true`). This guide picks up where that stops: it checks whether the **agent** can use its skills correctly.
+Ten copy-pasteable prompts plus a live GitHub check that prove each skill works end-to-end across Slack and Outlook. The README's [§ Verification](../README.md#verification-what-success-looks-like) only checks plumbing (the bridge runs, the sidecar exists, scripts return `ok: true`). This guide picks up where that stops: it checks whether the **agent** can use its skills correctly.
 
 Once you've run all 10, head to [collective-wisdom.md](collective-wisdom.md) for the cross-channel skill-learning demo — where one user teaches the agent a new skill, the skill survives a full sandbox rebuild, and a different user invokes it from a different channel and gets the same output format.
 
@@ -35,14 +35,14 @@ Run through these once before starting.
 | Check | One-liner |
 |---|---|
 | Sandbox is `Ready` | `openshell sandbox list \| grep hermes-direct` |
-| Postgrest bridge is reachable | `curl -sf http://localhost:3100/github_issues?limit=1` (returns JSON; `[]` is fine — first sync may be pending) |
+| Postgrest bridge is reachable | `curl -sf http://localhost:3100/github_discussions?limit=1` (returns JSON; `[]` is fine — first sync may be pending) |
 | Slack works | DM `ping` to `@myuser_nemoclaw` produces a reply within ~10s. Red ❌ reaction = your Slack ID isn't in `SLACK_ALLOWED_IDS`. |
 | Outlook bridge works | Email `ping` to `OUTLOOK_TARGET_MAILBOX` from an allowed sender produces a reply within ~30s. |
 | **Optional** — unlocks Outlook Q2 | The owner of `OUTLOOK_REPLY_TO` has granted the bot delegate access in Outlook (**File → Account Settings → Delegate Access**). Without it, Graph returns `403: Cannot find row based on condition` for searches against `OUTLOOK_REPLY_TO`. |
 
 A few constraints to keep in mind:
 
-- **ETL freshness.** github-etl and forums-etl run hourly. If `source-etl-query` returns zero rows, wait 10 min and retry — the skill isn't broken.
+- **ETL freshness.** Source ETLs run hourly for mirrored discussions/forums. If `source-etl-query` returns zero rows, wait 10 min and retry — the skill isn't broken. Live GitHub checks use `github-readonly-live` and do not depend on the mirror.
 - **Session boundaries.** Each Outlook email opens a fresh session. Slack thread replies (same `thread_ts`) share one session. Cross-session continuity comes only from the memory subsystem.
 
 ---
@@ -154,12 +154,44 @@ In either case, the agent may **loop trying to satisfy "from my inbox"** rather 
 
 ---
 
+### github-readonly-live
+
+Sanity-check the live GitHub path from the host shell:
+
+```console
+$ openshell sandbox exec --name hermes-direct -- sh -lc \
+    '/usr/bin/python3 /sandbox/.hermes-data/skills/github-readonly-live/scripts/github_readonly.py rate-limit'
+```
+
+**Expected:** the response shows the authenticated GitHub REST rate limit when
+`GITHUB_TOKEN` or `GH_TOKEN` is configured. The token itself should never appear
+in output.
+
+Ask the agent:
+
+> How many issues does the configured GitHub repo have? Use live GitHub, not the ETL mirror.
+
+**Expected:** agent uses the generic helper pattern, for example
+`github_readonly.py get issues --param state=all --paginate --count --exclude-pulls`.
+It should not use `gh`, `git`, GitHub search, GraphQL, or the source ETL
+mirror for this live count.
+
+Also ask:
+
+> How many pull requests are currently open in the configured GitHub repo? Use live GitHub, not the ETL mirror.
+
+**Expected:** agent uses the generic helper pattern, for example
+`github_readonly.py get pulls --param state=open --paginate --count`; it should
+not estimate from a single `pulls --limit` page.
+
+---
+
 ### source-etl-query
 
 Sanity-check the postgrest bridge first (host shell):
 
 ```console
-$ curl -sf http://localhost:3100/github_issues?limit=1 | head -c 300
+$ curl -sf http://localhost:3100/github_discussions?limit=1 | head -c 300
 ```
 
 Empty array `[]` is fine — bridge is up but ETL hasn't finished first sync. A `404` or refusal means re-run `bash scripts/00-host-services.sh`.
@@ -168,10 +200,12 @@ Empty array `[]` is fine — bridge is up but ETL hasn't finished first sync. A 
 
 **Send via:** Slack DM to `@myuser_nemoclaw`
 
-> Show me the 3 most recently mirrored GitHub issues from the source-etl postgrest bridge — title and number only.
+> Show me the 3 most recently mirrored GitHub discussions from the source-etl postgrest bridge — title and number only.
 
-**Expected:** agent runs `query_source_etl.py github-issues --limit 3`.
-**Verify:** response contains 3 numbered items. The agent should *not* claim GitHub is unreachable — that path is correctly blocked by sandbox policy; the postgrest mirror is the supported route.
+**Expected:** agent runs `query_source_etl.py github-discussions --limit 3`.
+**Verify:** response contains 3 numbered items. The agent should identify this
+as mirrored PostgREST data, not live GitHub data. Current GitHub issues and PRs
+should use the separate `github-readonly-live` skill for `GITHUB_READONLY_REPO`.
 
 #### Q8 — realistic
 
@@ -191,9 +225,9 @@ Empty array `[]` is fine — bridge is up but ETL hasn't finished first sync. A 
 
 **Send via:** Slack DM to `@myuser_nemoclaw`
 
-> Use cross-source-gap-analysis. Compare one Slack channel related to NemoClaw against the github-issues mirror. Just confirm both sources returned data and report the row count from each — no analysis yet.
+> Use cross-source-gap-analysis. Compare one Slack channel related to NemoClaw against live GitHub issues for the configured repo. Just confirm both sources returned data and report the row count from each — no analysis yet.
 
-**Expected:** agent loads `cross-source-gap-analysis`, then `slack-channel-finder` and `source-etl-query`, fetches a small slice from each.
+**Expected:** agent loads `cross-source-gap-analysis`, then `slack-channel-finder` and `github-readonly-live`, fetches a small slice from each.
 **Verify:** reply mentions both source counts as concrete numbers. No actual gap analysis yet — wiring proof only.
 
 #### Q10 — realistic
@@ -201,9 +235,9 @@ Empty array `[]` is fine — bridge is up but ETL hasn't finished first sync. A 
 **Send via:** email to `OUTLOOK_TARGET_MAILBOX`
 **Subject:** `Slack-vs-GitHub gaps for NemoClaw`
 
-> Run a cross-source-gap-analysis: pick one NemoClaw-related Slack channel, sample the last 7 days, and compare against open GitHub issues in the mirror. Tell me which topics are discussed in Slack but have no corresponding GitHub issue, and which GitHub issues have no Slack discussion. Use the skill's documented "scope / agree / gaps / follow-ups" structure.
+> Run a cross-source-gap-analysis: pick one NemoClaw-related Slack channel, sample the last 7 days, and compare against live open GitHub issues in the configured repo. Tell me which topics are discussed in Slack but have no corresponding GitHub issue, and which GitHub issues have no Slack discussion. Use the skill's documented "scope / agree / gaps / follow-ups" structure.
 
-**Expected:** agent picks a channel via `slack-channel-finder`, summarizes via `slack-channel-summarizer`, queries `source-etl-query github-issues`, normalizes both, presents a 4-section reply.
+**Expected:** agent picks a channel via `slack-channel-finder`, summarizes via `slack-channel-summarizer`, queries live issues through `github-readonly-live`, normalizes both, presents a 4-section reply.
 **Verify:** reply contains all four documented section headings — `scope and time window`, `what all sources agree on`, `gaps or mismatches`, `concrete follow-ups` — and grounds each gap in a specific channel message or GitHub issue number, not generic abstractions.
 
 ---
@@ -214,5 +248,5 @@ Empty array `[]` is fine — bridge is up but ETL hasn't finished first sync. A 
 |---|---|
 | Outlook search Q2 returns 403 | Bot lacks delegate access to `OUTLOOK_REPLY_TO`. Either grant it (Outlook → File → Account Settings → Delegate Access) or substitute `OUTLOOK_TARGET_MAILBOX` in the prompt. |
 | Outlook search Q2 hangs without ever replying | `OUTLOOK_REPLY_TO` returns 404 from Graph — the address isn't a real Entra user in your tenant. Confirm via the sidecar log (`openshell sandbox exec --name hermes-direct -- tail -50 /tmp/ms-graph-sidecar.log \| grep 404`). Fix: set `OUTLOOK_REPLY_TO` to a real mailbox you own and rebuild. To unblock the in-flight request: `openshell sandbox exec --name hermes-direct -- pkill -f outlook-bridge.py`. |
-| `source-etl-query` returns 0 rows for everything | Run `curl -sf http://localhost:3100/github_issues?limit=1`. Empty → ETL hasn't completed first sync (wait 10 min). Unreachable → re-run `bash scripts/00-host-services.sh`. |
+| `source-etl-query` returns 0 rows for everything | Run `curl -sf http://localhost:3100/github_discussions?limit=1` and `curl -sf http://localhost:3100/forum_topics?limit=1`. Empty → ETL hasn't completed first sync (wait 10 min). Unreachable → re-run `bash scripts/00-host-services.sh`. |
 | `grep: /sandbox/.hermes-data/...: No such file or directory` (running side-checks against the sandbox) | `openshell sandbox exec` doesn't run a shell, so `*.md` and other globs don't expand. Wrap in `bash -c '…'`, or pass explicit filenames. |

@@ -6,17 +6,22 @@ A personal Hermes agent that surfaces what the developer community is working
 on, struggling with, asking about, and flagging as gaps — and compares it
 against what internal developer/product teams are prioritizing, so resources
 can be aligned against actual community demand. The agent draws on signal
-from GitHub issues, NVIDIA forums, and Slack channels; you interact with it
-via Outlook email and/or Slack. Outlook is the recommended primary channel,
-but either is enough on its own — at least one of the two must be configured.
+from live GitHub repository state, mirrored GitHub discussions, NVIDIA forums,
+and Slack channels; you interact with it via Outlook email and/or Slack.
+Outlook is the recommended primary channel, but either is enough on its own —
+at least one of the two must be configured.
 
 ## Architecture
 
 The Hermes sandbox operates with a deliberately narrow egress policy. It connects
-live to Slack and Outlook for interactions and research. GitHub and NVIDIA forum
-data are never fetched live from inside the sandbox — host-side ETL containers
-scrape those sources on a schedule and write results into Postgres, and the
-sandbox queries that mirror through a read-only PostgREST HTTP bridge.
+live to Slack and Outlook for interactions and research. It also has
+authenticated, read-only GitHub REST access to one configured repository
+(`GITHUB_READONLY_REPO`). The GitHub token is attached through an OpenShell
+provider placeholder so GitHub rate limits are practical, while `policy.yaml`
+still limits the sandbox to repo-scoped `GET` requests. GitHub discussions,
+historical mirror data, and NVIDIA forum data come from host-side ETL
+containers that scrape on a schedule, write results into Postgres, and expose
+that mirror through a read-only PostgREST HTTP bridge.
 
 ```mermaid
 flowchart LR
@@ -25,7 +30,7 @@ flowchart LR
     slack["Internal\nSlack Bot App"]
     outlook["Internal\nOutlook / MS Graph"]
     entra["Internal\nMS Entra ID"]
-    github["External\nGitHub API\nissues · PRs · discussions"]
+    github["External\nGitHub API\nissues · PRs · contents"]
     forums["External\nNVIDIA Forums\nnemoclaw tag"]
 
     subgraph host["Host Machine"]
@@ -38,6 +43,7 @@ flowchart LR
 
             subgraph sourceSkills["Source Skills"]
                 direction LR
+                s0["github-readonly-live"]
                 s1["source-etl-query"]
                 s4["cross-source-gap-analysis"]
             end
@@ -70,7 +76,7 @@ flowchart LR
         phoenix["Phoenix Telemetry\n:6006"]
         postgrest["PostgREST\nread-only :3100"]
         postgres[("PostgreSQL\nsource mirror")]
-        etls["Source ETLs\nGitHub + Forums\nhourly deltas"]
+        etls["Source ETLs\nGitHub discussions + Forums\nhourly deltas"]
         tokenManager["MS Graph Token Manager\nMSAL sessions\n:8765"]
 
         proxy -->|"OTLP traces"| phoenix
@@ -84,6 +90,7 @@ flowchart LR
     proxy -->|"inference"| nvidia
     proxy -->|"Slack bot"| slack
     proxy -->|"Graph API"| outlook
+    proxy -->|"auth read-only REST\none configured repo"| github
     tokenManager -->|"MSAL auth"| entra
     entra -.->|"issues token"| tokenManager
     etls -->|"scheduled scrape"| github
@@ -104,11 +111,12 @@ flowchart LR
 
 **Key invariants:**
 
-- The agent never has direct network access to GitHub or the NVIDIA forums. All GitHub and forum data the agent sees comes from the Postgres mirror.
+- The agent has authenticated read-only `api.github.com` access for exactly one configured repo. The raw GitHub token stays in an OpenShell provider; the sandbox sees only a placeholder, and policy still blocks writes, non-API GitHub hosts, `git`, and `gh`.
+- GitHub discussions, historical mirror data, and NVIDIA forum data come from the Postgres mirror.
 - Slack and Outlook are live connections from the sandbox; the agent can read and write both in real time.
 - Compatible-endpoint inference egress is required for the agent's LLM calls — it's not a research/data-ingestion path.
 - The ETL containers are non-agentic — fixed scraper logic on an hourly interval, no LLM involvement.
-- The PostgREST bridge exposes a read-only HTTP API on host port `3100`, and the sandbox reaches it through `host.openshell.internal` without any live GitHub or forum egress.
+- The PostgREST bridge exposes a read-only HTTP API on host port `3100`, and the sandbox reaches it through `host.openshell.internal` without any live forum egress.
 
 ## Agent skills
 
@@ -116,7 +124,8 @@ Skills are loaded on demand by the agent when relevant to a task. They live in [
 
 | Skill | Purpose |
 |-------|---------|
-| `source-etl-query` | Query the host-side PostgREST bridge for mirrored GitHub and NVIDIA forum data. Primary data-access skill for both GitHub and forum research. |
+| `github-readonly-live` | Query the configured live GitHub repo via authenticated, policy-scoped REST `GET` requests. |
+| `source-etl-query` | Query the host-side PostgREST bridge for mirrored GitHub discussions, historical mirror data, and NVIDIA forum data. |
 | `slack-channel-finder` | Discover Slack channels by topic, team, or domain and infer what each channel is for. |
 | `slack-channel-summarizer` | Resolve Slack channels by name or ID and read message history via the Slack Web API. |
 | `outlook-email-search` | Search the Outlook mailbox via Microsoft Graph to find and read emails relevant to a question. |
@@ -190,7 +199,9 @@ Now edit `.env` and fill in everything you already have:
   holds real Entra sessions; leave commented for local experimentation
 - (optional) `SLACK_ALLOWED_IDS` — comma-separated Slack user IDs to restrict who can DM the agent; leave empty to allow anyone in the workspace
 - (optional) `OUTLOOK_ALLOWED_SENDERS` — comma-separated allowlist of email senders the agent will respond to; leave empty to accept any sender
-- (optional) `GITHUB_TOKEN`, `PHOENIX_COLLECTOR_ENDPOINT`
+- (optional) `GITHUB_TOKEN` or `GH_TOKEN` for authenticated sandbox read-only
+  GitHub REST, `GITHUB_READONLY_REPO`,
+  `PHOENIX_COLLECTOR_ENDPOINT`
 
 ### Phase 3 — Start host services
 
@@ -200,7 +211,7 @@ $ bash scripts/00-host-services.sh
 
 Brings up the long-lived Docker stack from [extras/docker-compose.yml](extras/docker-compose.yml):
 phoenix (telemetry), MS Graph token manager (Outlook OAuth broker on port 8765), postgres
-(ETL backing store), github-etl / forums-etl workers, and PostgREST on host port 3100.
+(ETL backing store), source ETL workers for mirrored discussions/forums, and PostgREST on host port 3100.
 
 These services are designed to outlive the sandbox: a `bash scripts/tear-down.sh` followed
 by another `bash scripts/bring-up.sh` does **not** require re-running this phase. Only run
@@ -248,7 +259,7 @@ endpoint into the image so OpenInference traces stream into Phoenix at
 ## What this example owns
 
 - **Owns** (in this directory): `agents/hermes/` (the full Hermes asset tree, staged
-  here for convenience), `policy.yaml` (sandbox network/filesystem policy), `extras/`,
+  here for convenience), `policy.yaml` (sandbox network/filesystem policy template), `extras/`,
   `.env`, and `scripts/`:
   - `00-host-services.sh` — host-side bootstrap (Phase 3). Independent of the sandbox lifecycle.
   - `01-gateway.sh` / `02-providers.sh` / `03-sandbox.sh` — phase scripts called by the bring-up orchestrator.
@@ -257,23 +268,21 @@ endpoint into the image so OpenInference traces stream into Phoenix at
   - `snapshot.sh` / `restore.sh` — explicit Hermes state preservation across tear-down/bring-up cycles.
   - `download-traces.sh` — pull ATIF trace records from `/tmp/atif/` inside the sandbox into a host-side tarball. See [Capturing ATIF traces](#capturing-atif-traces) for the env knobs.
   - `host-tls-proxy.py` — optional plain-HTTP forwarder for hosts where the sandbox can't validate the inference endpoint's TLS chain (corporate VPN, split-horizon DNS, mkcert). See [docs/host-tls-proxy.md](docs/host-tls-proxy.md).
-- **Generates and discards**: a sed-patched `.Dockerfile.staged` at the example dir
-  root. OpenShell does the actual build; we patch ARG defaults beforehand because
-  `openshell sandbox create` doesn't expose `--build-arg`.
+- **Generates and discards**: sed-patched `.Dockerfile.staged` and
+  `.policy.staged.yaml` files at the example dir root. OpenShell does the actual
+  build; we patch ARG defaults beforehand because `openshell sandbox create`
+  doesn't expose `--build-arg`, and we patch the GitHub read-only repo scope
+  from `.env` before applying the policy.
 
 The example's Dockerfile drops the upstream `COPY nemoclaw-blueprint/` step —
 nothing in the Hermes runtime reads `/sandbox/.nemoclaw/blueprints/`, so this
 example is **fully self-contained** and never needs a NemoClaw checkout.
 
-The Dockerfile always installs NeMo-Relay: an in-image `pip install` of the
-`nemo-relay` version pinned by `NEMO_RELAY_VERSION` in
-[agents/hermes/Dockerfile](agents/hermes/Dockerfile) (from PyPI), plus a
-re-install of Hermes with the NeMo-Relay integration patch fetched from
-[NVIDIA/NeMo-Relay](https://github.com/NVIDIA/NeMo-Relay) at the pinned
-`NEMO_RELAY_VERSION` tag and applied during the build (~1-2 min on a cold
-build, cached on rebuild). That alone is enough for the agent to write ATIF
-trace records to `/tmp/atif/` — capture them with
-[`scripts/download-traces.sh`](scripts/download-traces.sh).
+The Dockerfile always installs NeMo-Relay: it builds the pinned
+`nemo-relay-cli` release in a builder stage, upgrades Hermes to a version with
+rich plugin hook payloads, and runs a sidecar gateway at startup. That is
+enough for the agent to write ATIF trace records to `/tmp/atif/` — capture
+them with [`scripts/download-traces.sh`](scripts/download-traces.sh).
 
 Setting `PHOENIX_COLLECTOR_ENDPOINT` is a separate opt-in for live
 OpenInference egress: when present, `03-sandbox.sh` bakes the URL into the
@@ -327,7 +336,7 @@ special-case "no file."
   Otherwise leave it empty. See [`certs/README.md`](certs/README.md) for
   details.
 
-## Providers created (mirrors what `nemoclaw onboard` produces)
+## Providers created by `bring-up.sh`
 
 | Provider name | `--type` | Credential env var | Required? |
 |---|---|---|---|
@@ -335,11 +344,52 @@ special-case "no file."
 | `<sandbox>-outlook` | `generic` | `OUTLOOK_CLIENT_ID`, `OUTLOOK_TENANT_ID`, `OUTLOOK_SESSION_UUID` | Optional. Created only when the Outlook block is fully populated; partial config is rejected. At least one of Outlook or Slack must be configured. |
 | `<sandbox>-slack-bridge` | `generic` | `SLACK_BOT_TOKEN` | Optional. At least one of Outlook or Slack must be configured. |
 | `<sandbox>-slack-app` | `generic` | `SLACK_APP_TOKEN` | Optional. Required if Slack is enabled (Socket Mode needs both tokens). |
-| `<sandbox>-github` | `github` | `GITHUB_TOKEN` (or `GH_TOKEN`) | Optional |
+| `<sandbox>-github` | `github` | `GITHUB_TOKEN` or `GH_TOKEN` | Optional but recommended. Enables authenticated live GitHub REST reads. The sandbox receives only the OpenShell placeholder; `policy.yaml` limits use to repo-scoped `GET` routes from approved binaries. |
 
 The `compatible-endpoint` provider is **not** prefixed with the sandbox name — it's a
 shared inference provider and is consumed via `openshell inference set --provider
 compatible-endpoint --model <NEMOCLAW_MODEL>` rather than `--provider` on sandbox create.
+
+`GITHUB_TOKEN` is attached as `<sandbox>-github` for live sandbox GitHub reads.
+If `GITHUB_TOKEN` is empty but `GH_TOKEN` is set, `GH_TOKEN` is used for the
+provider instead. In both cases, the sandbox sees only an OpenShell placeholder;
+the raw token is resolved by the proxy on egress. GitHub write attempts are
+still blocked by the applied policy, which allows only selected `GET` paths
+under `api.github.com/repos/$GITHUB_READONLY_REPO`. If you keep the optional
+host GitHub mirror enabled, it also reads `GITHUB_TOKEN` for API rate limits.
+
+## Changing the available live GitHub repo
+
+The live GitHub policy is repo-scoped. To change the repo the sandbox can read:
+
+1. Set `GITHUB_READONLY_REPO=owner/repo` in `.env`.
+2. For practical API rate limits, set `GITHUB_TOKEN` or `GH_TOKEN`. Private
+   repos require a token with access to the target repo; public repos can be
+   read without a token but use GitHub's lower unauthenticated API limits.
+3. Recreate the sandbox so `scripts/03-sandbox.sh` can stage the Dockerfile env
+   and apply a policy for the new repo:
+
+```bash
+bash scripts/tear-down.sh
+bash scripts/bring-up.sh
+```
+
+For normal repo changes, do not edit `policy.yaml` by hand; `03-sandbox.sh`
+patches the `__GITHUB_READONLY_REPO__` placeholder before applying the staged
+policy. After bring-up, verify the live repo path from the host shell:
+
+```bash
+set -a; . ./.env; set +a
+openshell sandbox exec --name "${SANDBOX_NAME:-hermes-direct}" -- sh -lc \
+  '/usr/bin/python3 /sandbox/.hermes-data/skills/github-readonly-live/scripts/github_readonly.py get . --fields full_name,default_branch,open_issues_count'
+```
+
+`GITHUB_READONLY_REPO` controls only live REST reads through
+`github-readonly-live`. The host-side ETL mirror is independent; set
+`SOURCE_ETL_GITHUB_REPO=owner/repo` if you also want mirrored GitHub
+discussions/history from a different repo, then rerun
+`bash scripts/00-host-services.sh`. Existing mirror database/state is preserved
+unless you remove the compose volumes.
 
 ## Configuration knobs (all env vars)
 
@@ -351,6 +401,9 @@ compatible-endpoint --model <NEMOCLAW_MODEL>` rather than `--provider` on sandbo
 | `NEMOCLAW_MODEL` | `nvidia/nemotron-3-super-120b-a12b` | Inference model passed to `openshell inference set`. |
 | `NEMOCLAW_ENDPOINT_URL` | `https://integrate.api.nvidia.com/v1` | Upstream base URL for the `compatible-endpoint` provider. (`OPENAI_BASE_URL` is also accepted as a fallback.) |
 | `COMPATIBLE_API_KEY` | (none) | Inference API key. Mirrors NemoClaw's `REMOTE_PROVIDER_CONFIG.custom`. (`OPENAI_API_KEY` is also accepted.) |
+| `GITHUB_TOKEN` / `GH_TOKEN` | (none) | Optional GitHub token for authenticated live REST reads. `GITHUB_TOKEN` also feeds the optional host GitHub mirror; if it is unset, `GH_TOKEN` can still create the sandbox provider. |
+| `GITHUB_READONLY_REPO` | `NVIDIA/OpenShell` | The only repo allowed by the live GitHub REST policy, formatted as `owner/repo`. Recreate the sandbox after changing it. |
+| `SOURCE_ETL_GITHUB_REPO` | `NVIDIA/NemoClaw` | Host-side GitHub mirror repo for source-etls. This is independent of `GITHUB_READONLY_REPO`. |
 | `TOKEN_MANAGER_HOST` | `host.openshell.internal` | Host where the MS Graph token manager is reachable from inside the sandbox. |
 | `PHOENIX_COLLECTOR_ENDPOINT` | (none) | Set to e.g. `http://host.openshell.internal:6006/v1/traces` to stream OpenInference traces to a Phoenix collector. ATIF trace generation does not depend on this — NeMo-Relay is always installed and writes ATIF locally to `/tmp/atif/` regardless. |
 
@@ -388,7 +441,7 @@ $ bash scripts/tear-down.sh
 ```
 
 Removes the sandbox, the Outlook/GitHub/Slack providers, and any leftover
-`.Dockerfile.staged`. **Does not** destroy the gateway or stop host services
+staged Dockerfile/policy files. **Does not** destroy the gateway or stop host services
 (phoenix, token manager, postgres, ETLs, postgrest) by default — those are
 typically long-lived. Opt-in flags (mutually exclusive):
 

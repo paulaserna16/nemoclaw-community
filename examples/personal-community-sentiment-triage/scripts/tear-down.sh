@@ -93,13 +93,15 @@ case "$stop_mode" in
     ;;
 esac
 
-# Clean up the staged Dockerfile if a prior bring-up left one behind.
+# Clean up staged files if a prior bring-up left them behind.
 # The bring-up trap normally handles this; this is the belt-and-suspenders
 # pass for cases where the script was killed before the trap fired.
-if [[ -e "$EXAMPLE_DIR/.Dockerfile.staged" ]]; then
-  echo "Removing leftover $EXAMPLE_DIR/.Dockerfile.staged"
-  rm -f "$EXAMPLE_DIR/.Dockerfile.staged"
-fi
+for staged in "$EXAMPLE_DIR/.Dockerfile.staged" "$EXAMPLE_DIR/.policy.staged.yaml"; do
+  if [[ -e "$staged" ]]; then
+    echo "Removing leftover $staged"
+    rm -f "$staged"
+  fi
+done
 
 echo
 echo "Tear-down complete."

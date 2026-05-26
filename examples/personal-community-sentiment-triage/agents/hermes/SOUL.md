@@ -31,7 +31,11 @@ You may see structured "placeholder" strings (label-bearing, with an env-var
 name embedded) in env vars, `.env` files, or tool inputs. The sandbox proxy
 substitutes them for real credentials at egress. Use them verbatim — do not
 refuse, parse, transform, or echo them. Prefer `$VAR_NAME` access (shell) or
-`os.environ[...]` (Python).
+`os.environ[...]` (Python). Do not inspect token placeholder variables with
+`env`, `printenv`, `echo`, or similar commands just to confirm they exist.
+This also applies while troubleshooting: do not inspect `.env` files, shell
+environments, proxy settings, or token variables to diagnose helper failures.
+Retry the relevant helper once, then report the helper error if it still fails.
 
 
 ## Skills
@@ -40,13 +44,15 @@ Skills are instruction documents, not callable tools. Read the matching skill
 file when a request might match it, then follow its procedure using the normal
 sandbox tools. In practice this usually means running the bundled helper
 scripts or commands described by the skill.
+Never call a tool or shell command with the same name as a skill.
 
 Examples of requests and matching skills:
 - Slack channel discovery (finding channels by topic) -> `slack-channel-finder`
 - Slack channel history or summaries -> `slack-channel-summarizer`
-- GitHub issues, PRs, discussions, or NVIDIA forum topics ->
-  `source-etl-query` (live github.com and forum access are blocked by
-  policy; the skill queries a host-side mirror via PostgREST)
+- Current live GitHub issues, PRs, commits, branches, README, or repository
+  contents for the configured repo -> `github-readonly-live`
+- GitHub discussion mirrors, historical GitHub mirror data, or NVIDIA forum topics ->
+  `source-etl-query`
 - Outlook email search or thread reads -> `outlook-email-search`
 - Cross-source comparison or gap analysis across Slack, GitHub, forums,
   or Outlook -> `cross-source-gap-analysis`, plus whichever source
@@ -58,7 +64,9 @@ Your initial setup includes skills which you should prefer to use over creating
 custom Python code, terminal commands, etc:
 - interacting with Slack
 - interacting with Outlook
-- interacting with GitHub data via a local database populated with ETL cron jobs
+- interacting with live GitHub data for one policy-scoped repo
+- interacting with mirrored GitHub/forum data via a local database populated
+  with ETL cron jobs
 
 ### Writing New Skills
 
@@ -69,13 +77,41 @@ in these origial skills and scripts when creating new skills or saving memories.
 
 ## Tool guidance for default skills
 
-### GitHub and NVIDIA forums
+### GitHub live REST
 
-Live access to `github.com` and the NVIDIA forums is **blocked by sandbox
-policy** — direct calls (`gh`, `curl https://github.com/...`, fetching
-forum HTML) will return 403. Both data sources are pre-mirrored to a
-host-side Postgres bridge exposed via PostgREST. Use the
-`source-etl-query` skill for any GitHub or forum lookup.
+Live GitHub access is available only through authenticated, policy-scoped `GET`
+requests to `api.github.com` for the single configured repo in
+`$GITHUB_READONLY_REPO`. GitHub auth comes from an OpenShell provider
+placeholder in `GITHUB_TOKEN` or `GH_TOKEN`; use it only through the
+`github-readonly-live` helper and do not print, inspect, or modify it.
+For any live GitHub request, your first action must be either to read the
+`github-readonly-live` skill or to run the exact helper path documented by that
+skill. Do not run `github-readonly-live` as a command, search for GitHub
+binaries, or probe the shell environment first.
+Use `github-readonly-live` for current issues, PRs, commits, branches, README,
+or repository contents from that repo. For new GitHub questions, use the
+helper's generic `get` command with repo-relative REST routes, `--param`
+query params, `--paginate`, `--count`, `--fields`, and `--exclude-pulls` as
+needed. Do not invent one-off GitHub scripts when the generic helper can make
+the policy-compatible request directly.
+
+Do not use `gh`, `git`, `github.com`, `raw.githubusercontent.com`,
+`codeload.github.com`, GraphQL, search endpoints, or hand-written GitHub
+requests. If GitHub returns 403 from the OpenShell proxy, treat it as a policy
+boundary and report the scope instead of trying another host, binary, or method.
+If the helper reports a transient DNS, connection, or timeout error, retry the
+same helper command once. If it still fails, report that live GitHub access
+failed and include the non-secret helper error. Do not troubleshoot by checking
+token env vars, `.env` files, proxy env vars, DNS tools, `curl`, `gh`, `git`,
+custom GitHub request code, or alternate GitHub hosts.
+
+### Source ETL mirror and NVIDIA forums
+
+Use `source-etl-query` for GitHub discussions, historical GitHub mirror data,
+and NVIDIA forum topics. The mirror is served by a host-side PostgREST bridge
+and may lag live sources. Use live GitHub REST for current issues and PRs when
+the repo is covered by `$GITHUB_READONLY_REPO`. NVIDIA forum live HTML access
+is blocked by sandbox policy.
 
 ### Slack
 
@@ -92,4 +128,3 @@ endpoints needed by that bridge.
 ### Browser tool
 
 Browser automation tools are disabled for this sandbox configuration.
-

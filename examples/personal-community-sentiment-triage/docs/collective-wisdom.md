@@ -40,8 +40,9 @@ The README's [§ Persistence: collective wisdom across restarts](../README.md#pe
 | Slack app handle | Note your bot's `@`-handle from the Slack app manifest (see [set-up-slack.md](set-up-slack.md)). The doc refers to it as `@<your-bot>` — substitute as you go. |
 | At least one Slack user authorized | `grep SLACK_ALLOWED_IDS .env` lists ≥1 `U…` ID. The cross-user step (7) wants ≥2 — if you only have one, run that step yourself from a different channel and the cross-channel claim still holds. |
 | Outlook bridge works | Send `ping` to `OUTLOOK_TARGET_MAILBOX` from any address in `OUTLOOK_ALLOWED_SENDERS` (or any sender if that var is empty); reply within ~30s. |
-| ETL has data | `curl -sf http://localhost:3100/github_issues?limit=1 \| head -c 200` returns a non-empty array |
-| Skills dir is writable | `openshell sandbox exec --name hermes-direct -- ls -la /sandbox/.hermes-data/skills/` lists 5 baked-in skills, all owned by `sandbox` |
+| Live GitHub works | `openshell sandbox exec --name hermes-direct -- sh -lc '/usr/bin/python3 /sandbox/.hermes-data/skills/github-readonly-live/scripts/github_readonly.py rate-limit'` returns JSON without printing a token |
+| Discussion/forum mirror has data | `curl -sf http://localhost:3100/github_discussions?limit=1 \| head -c 200` or `curl -sf http://localhost:3100/forum_topics?limit=1 \| head -c 200` returns a non-empty array |
+| Skills dir is writable | `openshell sandbox exec --name hermes-direct -- ls -la /sandbox/.hermes-data/skills/` lists 6 baked-in skills, all owned by `sandbox` |
 
 A few notes:
 
@@ -75,14 +76,14 @@ $ openshell sandbox exec --name hermes-direct -- ls /sandbox/.hermes-data/skills
 $ grep SLACK_ALLOWED_IDS .env
 ```
 
-Expected: sandbox `Ready`; skills dir contains the 5 baked-in skills (`cross-source-gap-analysis`, `outlook-email-search`, `slack-channel-finder`, `slack-channel-summarizer`, `source-etl-query`); `SLACK_ALLOWED_IDS` lists at least one ID.
+Expected: sandbox `Ready`; skills dir contains the 6 baked-in skills (`cross-source-gap-analysis`, `github-readonly-live`, `outlook-email-search`, `slack-channel-finder`, `slack-channel-summarizer`, `source-etl-query`); `SLACK_ALLOWED_IDS` lists at least one ID.
 
-If a sixth, user-authored skill from a previous run is sitting in the skills directory, wipe anything that isn't one of the five baked-in names so the demo starts on a clean slate:
+If an extra user-authored skill from a previous run is sitting in the skills directory, wipe anything that isn't one of the six baked-in names so the demo starts on a clean slate:
 
 The command must be on a single line — `openshell sandbox exec` rejects literal newlines in the command argument (gRPC `InvalidArgument: command argument 2 contains newline or carriage return characters`). Use `;` separators instead of multi-line scripts.
 
 ```console
-$ openshell sandbox exec --name hermes-direct -- bash -c 'cd /sandbox/.hermes-data/skills/ && for d in */; do case "${d%/}" in cross-source-gap-analysis|outlook-email-search|slack-channel-finder|slack-channel-summarizer|source-etl-query) ;; *) echo "removing ${d%/}"; rm -rf "$d" ;; esac; done'
+$ openshell sandbox exec --name hermes-direct -- bash -c 'cd /sandbox/.hermes-data/skills/ && for d in */; do case "${d%/}" in cross-source-gap-analysis|github-readonly-live|outlook-email-search|slack-channel-finder|slack-channel-summarizer|source-etl-query) ;; *) echo "removing ${d%/}"; rm -rf "$d" ;; esac; done'
 ```
 
 ### Step 1 — User A iterates on a format via Slack DM
@@ -126,12 +127,12 @@ The agent picked its own name and its own organizational layout — for example,
 
 #### 2a — Find the new SKILL.md
 
-Look for any SKILL.md under `skills/`, then exclude the five baked-in skills. Capture the full path:
+Look for any SKILL.md under `skills/`, then exclude the six baked-in skills. Capture the full path:
 
 ```console
 $ NEW_SKILL_PATH=$(openshell sandbox exec --name hermes-direct -- bash -c \
     'find /sandbox/.hermes-data/skills -name SKILL.md' \
-    | grep -vE "/(cross-source-gap-analysis|outlook-email-search|slack-channel-finder|slack-channel-summarizer|source-etl-query)/SKILL.md$")
+    | grep -vE "/(cross-source-gap-analysis|github-readonly-live|outlook-email-search|slack-channel-finder|slack-channel-summarizer|source-etl-query)/SKILL.md$")
 $ echo "Path: $NEW_SKILL_PATH"
 ```
 
@@ -202,12 +203,12 @@ Wait until `openshell sandbox list` shows `hermes-direct` as `Ready` again. The 
 
 ### Step 5 — Confirm the fresh sandbox has no trace of the new skill
 
-Re-run the same `find` from step 2a — it should return empty (no SKILL.md outside the five baked-in ones):
+Re-run the same `find` from step 2a — it should return empty (no SKILL.md outside the six baked-in ones):
 
 ```console
 $ openshell sandbox exec --name hermes-direct -- bash -c \
     'find /sandbox/.hermes-data/skills -name SKILL.md' \
-    | grep -vE "/(cross-source-gap-analysis|outlook-email-search|slack-channel-finder|slack-channel-summarizer|source-etl-query)/SKILL.md$"
+    | grep -vE "/(cross-source-gap-analysis|github-readonly-live|outlook-email-search|slack-channel-finder|slack-channel-summarizer|source-etl-query)/SKILL.md$"
 $ echo "(empty output = clean slate)"
 ```
 
@@ -221,7 +222,7 @@ Expected: zero non-baked-in SKILL.md files. The category dir the agent created (
 $ bash scripts/restore.sh
 $ openshell sandbox exec --name hermes-direct -- bash -c \
     'find /sandbox/.hermes-data/skills -name SKILL.md' \
-    | grep -vE "/(cross-source-gap-analysis|outlook-email-search|slack-channel-finder|slack-channel-summarizer|source-etl-query)/SKILL.md$"
+    | grep -vE "/(cross-source-gap-analysis|github-readonly-live|outlook-email-search|slack-channel-finder|slack-channel-summarizer|source-etl-query)/SKILL.md$"
 $ openshell sandbox exec --name hermes-direct -- cat "$NEW_SKILL_PATH" | head -10
 ```
 
@@ -241,7 +242,7 @@ User B — who never participated in step 1's conversation, never saw the format
 
 Wait ~30s for the bridge to reply by email.
 
-Expected: the email reply opens with `**NemoClaw Daily Issue Digest — {date}, last 3 day(s)**`, contains exactly 5 issue bullets and 3 discussion/forum bullets, and closes with `**Bottom line:**` followed by 2-3 sentences. Actual issue numbers and titles are pulled live from the mirror — they will be specific real `NVIDIA/NemoClaw` issues, not placeholders.
+Expected: the email reply opens with `**NemoClaw Daily Issue Digest — {date}, last 3 day(s)**`, contains exactly 5 issue bullets and 3 discussion/forum bullets, and closes with `**Bottom line:**` followed by 2-3 sentences. Actual issue numbers and titles are pulled from live GitHub for the configured repo — they will be specific real issues, not placeholders.
 
 **This proves:** a different user, on a different channel, who never saw the seeding conversation, gets the same output shape — and got there from natural language, not the skill's internal name. The skill, not the conversation, holds the format.
 
@@ -251,7 +252,7 @@ User A DMs `@<your-bot>` from a *new* DM thread (not the one from step 1, so no 
 
 > Daily NemoClaw digest, last 3 days please.
 
-Expected: structurally identical reply to User B's email — same bold header form, same 5+3 bullet structure, same `**Bottom line:**` closer. Issue numbers may differ slightly if the mirror updated between requests; that's acceptable variance because the data is live.
+Expected: structurally identical reply to User B's email — same bold header form, same 5+3 bullet structure, same `**Bottom line:**` closer. Issue numbers may differ slightly if live GitHub or the discussion/forum mirror updated between requests; that's acceptable variance.
 
 **This proves:** the skill is channel-stable as well as user-stable.
 
@@ -325,15 +326,16 @@ The canonical SKILL.md text is below. Copy it into a host-side file, upload it, 
 $ cat > /tmp/SKILL.md << 'SKILLEOF'
 ---
 name: daily-issue-digest
-description: Produce a fixed-format daily digest of important NemoClaw GitHub issues, discussions, and forum topics over a recent time window.
+description: Produce a fixed-format daily digest of important GitHub issues, discussions, and forum topics over a recent time window.
 ---
 
 # daily-issue-digest
 
 Use this skill when a user asks for a "daily update", "issue digest", "what's
 hot on NemoClaw", or any recurring summary of community activity scoped to
-the configured ETL mirror. Always render the output in the **fixed format**
-defined below — that fixed format is the entire reason this skill exists.
+the configured live GitHub repo plus the discussion/forum mirror. Always render
+the output in the **fixed format** defined below — that fixed format is the
+entire reason this skill exists.
 
 ## When to use
 
@@ -344,33 +346,34 @@ defined below — that fixed format is the entire reason this skill exists.
 
 ## Access model
 
-- Use the existing `source-etl-query` skill's helper script for all data access.
-- Do not invent new ETL endpoints; do not attempt live GitHub or forum requests.
-- Read three tables in this order: github-issues, github-discussions, forum-topics.
+- Use `github-readonly-live` for current issues from `$GITHUB_READONLY_REPO`.
+- Use `source-etl-query` for mirrored GitHub discussions and NVIDIA forum topics.
+- Do not invent new ETL endpoints or direct GitHub requests; use the helpers
+  documented by those skills.
 
 ## Required Environment
 
-- SOURCE_ETL_API_URL, or SOURCE_ETL_API_HOST plus SOURCE_ETL_API_PORT
-  (the same env the source-etl-query skill consumes — already set in the sandbox).
+- `GITHUB_READONLY_REPO` for the live issue source.
+- `SOURCE_ETL_API_URL`, or `SOURCE_ETL_API_HOST` plus `SOURCE_ETL_API_PORT`
+  for discussion/forum mirror data.
 
 ## Procedure
 
 ### 1. Pull recent activity from each source
 
 Default window is 7 days. If the user gave a different window (e.g. "last 3 days"),
-adjust --limit upward to be safe — the script returns most-recent first, so
-caller-side filtering is fine.
+request enough rows to filter caller-side.
 
 ```bash
-/usr/bin/python3 /sandbox/.hermes-data/skills/source-etl-query/scripts/query_source_etl.py github-issues --limit 30
+/usr/bin/python3 /sandbox/.hermes-data/skills/github-readonly-live/scripts/github_readonly.py get issues --param state=all --param sort=updated --param direction=desc --limit 30 --exclude-pulls --fields number,title,state,updated_at,html_url
 /usr/bin/python3 /sandbox/.hermes-data/skills/source-etl-query/scripts/query_source_etl.py github-discussions --limit 20
 /usr/bin/python3 /sandbox/.hermes-data/skills/source-etl-query/scripts/query_source_etl.py forum-topics --limit 20
 ```
 
 ### 2. Rank by an importance heuristic
 
-The mirror returns number, state, updated_at, title for issues. Approximate
-importance by:
+The live GitHub helper returns number, state, updated_at, title, and html_url
+for issues. Approximate importance by:
 
 - **Recency** — items updated within the requested window come first.
 - **State** — open issues outrank closed ones inside the window.
@@ -390,7 +393,7 @@ Output exactly this shape — no flowing prose, no extra headers:
 
 **Top issues**
 - #{number} — {title} — `{state}` — updated {YYYY-MM-DD}
-  https://github.com/NVIDIA/NemoClaw/issues/{number}
+  {html_url from github-readonly-live}
   Why it matters: {one sentence, grounded in the title or a sibling row}
 - … (4 more, total of 5)
 
@@ -411,7 +414,8 @@ outlook-email-search).
 
 ## Pitfalls
 
-- The mirror refreshes hourly, so very-recent issues may not appear.
+- Live issues come from `github-readonly-live`; discussion and forum rows come
+  from the ETL mirror and may lag by up to an hour.
 - forum_topics is sparsely populated on some fixtures (3 rows is normal).
   If forum-topics returns fewer than 3 rows, fill the "Discussions and forums"
   block from github-discussions only — do not invent forum activity.

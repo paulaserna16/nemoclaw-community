@@ -8,7 +8,7 @@
 
 # ARGs that appear in FROM instructions must be declared before the first FROM
 # so Docker treats them as global build args (multi-stage scoping rule).
-ARG BASE_IMAGE=ghcr.io/nvidia/nemoclaw/hermes-sandbox-base@sha256:176ec6ec056cdf2dd45f60a0095fb6aac962eb5d7382d28d5734098a72399000
+ARG BASE_IMAGE=ghcr.io/nvidia/nemoclaw/hermes-sandbox-base@sha256:f76a2ed0509570b1ce5380327c7ebe2e120e97f524e9271e145d2ea34c83ba5e
 
 # ── Stage 0: build the MS Graph API sidecar binary ────────────────────────────
 # PyInstaller produces a self-contained executable at a unique path
@@ -35,10 +35,30 @@ RUN pyinstaller \
       --hidden-import aiohttp.web \
       ms_graph_sidecar.py
 
+# ── Stage 1: build the nemo-relay CLI binary ──────────────────────────────────
+# Built inside ${BASE_IMAGE} so the resulting binary links against the same
+# glibc as the runtime — same constraint as the sidecar-builder stage above.
+# 0.3.0-beta.2 is the first NeMo-Relay release on crates.io (the predecessor
+# crate `nemo-flow-cli` was published through 0.2.0 before the project's rename
+# from NeMo-Flow). `cargo install` is the simplest reproducible path; the
+# ~3-5 min toolchain bootstrap is amortized across the cargo target cache when
+# the version pin doesn't change.
+FROM ${BASE_IMAGE} AS nemo-relay-builder
+ARG NEMO_RELAY_CLI_VERSION=0.3.0-beta.2
+RUN apt-get update -qq \
+    && apt-get install -y --no-install-recommends \
+       build-essential ca-certificates curl pkg-config libssl-dev \
+    && rm -rf /var/lib/apt/lists/* \
+    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
+       | sh -s -- -y --default-toolchain stable --profile minimal \
+    && /root/.cargo/bin/cargo install --locked --root /out \
+       nemo-relay-cli --version "${NEMO_RELAY_CLI_VERSION}"
+# Produces /out/bin/nemo-relay
+
 # ── Main sandbox image ────────────────────────────────────────────────────────
 FROM ${BASE_IMAGE}
 
-# NeMo-Flow Phoenix OTLP endpoint — baked at image build time so start.sh
+# NeMo-Relay Phoenix OTLP endpoint — baked at image build time so start.sh
 # reads it directly from the container ENV without relying on runtime injection.
 # Empty string means no telemetry (standard behavior).
 ARG PHOENIX_COLLECTOR_ENDPOINT=""
@@ -91,66 +111,156 @@ RUN mkdir -p /etc/apt/keyrings \
 
 RUN pip3 install --no-cache-dir --break-system-packages "httpx>=0.27" "markdown-it-py>=3"
 
-# ── NeMo-Flow patched Hermes (always installed) ─────────────────────────
-# Replaces the unpatched Hermes from the base image with a NeMo-Flow-patched
-# build so the agent writes ATIF (Agent Trajectory Format) traces to
-# /tmp/atif. nemo-flow itself comes from PyPI. The patch itself patches
-# Hermes — adding a [nemo-flow] extra, a hermes_agent.plugins entry point,
-# and an ACG override seam in run_agent.py — so it's still required even
-# with the PyPI install of nemo_flow itself.
+# ── Upgrade Hermes from base image's v0.11.0 to v0.14.0 ─────────────────
+# NemoClaw's base image (even at its latest tag) pins HERMES_VERSION=v2026.4.23
+# (Hermes v0.11.0). v0.11.0's plugin hooks ship metadata-only kwargs to
+# pre_api_request / post_api_request — no real messages, no real response —
+# so observability backends (Langfuse, NeMo-Relay's hermes adapter) cannot
+# emit LLM spans with full content. v0.14.0 (v2026.5.16, "The Foundation
+# Release") adds rich-kwargs hook delivery and ships the bundled Langfuse
+# plugin that depends on it.
 #
-# ATIF writes are local-disk-only — no collector required. To additionally
-# stream OpenInference traces to Phoenix, set PHOENIX_COLLECTOR_ENDPOINT in
-# .env; that's a separate runtime knob and does not gate this install.
+# We mirror NemoClaw's tarball + uv-sync install pattern, but for a newer
+# version. /opt/hermes/.venv is preserved across the upgrade so uv can
+# incrementally reconcile dependencies against v0.14.0's uv.lock.
+ARG HERMES_UPGRADE_VERSION=v2026.5.16
+ARG HERMES_UPGRADE_TARBALL_SHA256=c0a554050a50ee9a62f3fa5cd288a167ba5640c42d647d100cdea084b7294143
+# messaging: slack-bolt + slack-sdk + aiohttp (and friends) for the Slack
+#   platform path.
+# web: fastapi + uvicorn for Hermes's web tools.
+# cli: simple-term-menu, used by `hermes chat` TUI menus. Without this the
+#   TUI banner path can try to lazy-install at runtime, which the
+#   locked-down sandbox can't satisfy.
+# edge-tts: edge-tts==7.2.7. The TTS check_fn fires during banner
+#   enumeration regardless of toolset config; pre-installing avoids the
+#   PyPI fetch attempt at runtime. HERMES_DISABLE_LAZY_INSTALLS=1 (set
+#   below + in start.sh) is the belt-and-suspenders fallback for any
+#   other lazy feature we haven't pre-installed.
+ARG HERMES_UV_EXTRAS="messaging web cli edge-tts"
+# Match the uv version NemoClaw uses for the base-image install.
+ARG UV_INSTALL_VERSION=0.11.8
+
+USER root
+RUN set -eu \
+    && curl -LsSf "https://astral.sh/uv/${UV_INSTALL_VERSION}/install.sh" \
+       | env INSTALLER_NO_MODIFY_PATH=1 sh \
+    && UV_BIN="" \
+    && for candidate in /root/.local/bin/uv /root/.cargo/bin/uv /usr/local/bin/uv; do \
+         if [ -x "$candidate" ]; then UV_BIN="$candidate"; break; fi; \
+       done \
+    && if [ -z "$UV_BIN" ]; then echo "uv installer did not produce a binary in any known location" >&2; exit 1; fi \
+    && install -m 755 "$UV_BIN" /usr/local/bin/uv \
+    && /usr/local/bin/uv --version \
+    && curl -fsSL "https://github.com/NousResearch/hermes-agent/archive/refs/tags/${HERMES_UPGRADE_VERSION}.tar.gz" \
+       -o /tmp/hermes.tgz \
+    && echo "${HERMES_UPGRADE_TARBALL_SHA256}  /tmp/hermes.tgz" | sha256sum -c - \
+    && find /opt/hermes -mindepth 1 -maxdepth 1 -not -name '.venv' -exec rm -rf {} + \
+    && tar -xzf /tmp/hermes.tgz -C /opt/hermes --strip-components=1 \
+    && rm /tmp/hermes.tgz \
+    && cd /opt/hermes \
+    && extras_args="" \
+    && for e in ${HERMES_UV_EXTRAS}; do extras_args="${extras_args} --extra ${e}"; done \
+    && UV_PROJECT_ENVIRONMENT=/opt/hermes/.venv /usr/local/bin/uv sync \
+       ${extras_args} --no-dev \
+    && chown -R sandbox:sandbox /opt/hermes
+
+# ── NeMo-Relay 0.3.0 sidecar gateway integration ─────────────────────────
+# Hermes stays unpatched (from BASE_IMAGE). start.sh launches a long-running
+# nemo-relay daemon; Hermes processes POST hook events to it via
+# NEMO_RELAY_GATEWAY_URL. ATIF writes are local-disk-only (no collector
+# required); set PHOENIX_COLLECTOR_ENDPOINT to additionally export
+# OpenInference traces to Phoenix.
 #
-# The patch is fetched from NeMo-Flow's GitHub tag at build time rather than
-# vendored, so we never drift from upstream. Pin NEMO_FLOW_VERSION to the
-# same release we install via pip; HERMES_NEMO_FLOW_COMMIT must match the
-# Hermes commit that NeMo-Flow's patch was generated against (see
-# https://github.com/NVIDIA/NeMo-Flow/blob/v0.1.0/third_party/sources.lock).
-# agents/hermes/patches/ is example-owned (not in NeMo-Flow upstream) so it
-# stays vendored. It holds the PYTHONPATH-targeted sitecustomize.py bootstrap
-# and the nemoclaw_patches.py chain-loaded bundle (httpx transport fix, Slack
-# catch-all, NeMo-Flow session finalization).
-ARG ENABLE_NEMO_FLOW=1
-ARG NEMO_FLOW_VERSION=0.1.0
-ARG HERMES_NEMO_FLOW_COMMIT=2367c6ffd53b16daa0ffa1b338f3f9ee5587d4d5
+# agents/hermes/patches/ is example-owned (not in NeMo-Relay upstream). It
+# holds the PYTHONPATH-targeted sitecustomize.py bootstrap (Slack-SDK
+# placeholder rewrite) and the nemoclaw_patches.py chain-loaded bundle
+# (Slack catch-all slash command).
+COPY --from=nemo-relay-builder /out/bin/nemo-relay /usr/local/bin/nemo-relay
+RUN chmod 755 /usr/local/bin/nemo-relay
+
+RUN mkdir -p /usr/local/lib/nemoclaw/bin
+
+# Per-turn finalize hook. Hermes only fires `on_session_finalize` from its
+# idle-session expiry watcher (~5 min default), but NeMo-Relay's ATIF writer
+# and root-span closer only act on `on_session_finalize` / `on_session_reset`.
+# This hook handler, registered as a second command on `on_session_end`,
+# rewrites the event name and re-posts to the gateway so each turn closes
+# its agent scope.
+COPY agents/hermes/nemo-relay/finalize-hook /usr/local/lib/nemoclaw/bin/nemo-relay-finalize-hook
+RUN chmod 755 /usr/local/lib/nemoclaw/bin/nemo-relay-finalize-hook
+
+# Interactive-shell shim for `hermes`. Prepended to PATH for sandbox shells
+# (via _PROXY_ENV_FILE in start.sh) so `hermes` resolves here first; blocks
+# setup/doctor in-sandbox and execs the upstream binary for everything else.
+COPY agents/hermes/nemo-relay/hermes-cli-shim /usr/local/lib/nemoclaw/bin/hermes
+RUN chmod 755 /usr/local/lib/nemoclaw/bin/hermes
 
 COPY agents/hermes/patches/ /usr/local/lib/nemoclaw-patches/
 
-# hadolint ignore=DL3013
-RUN if [ "$ENABLE_NEMO_FLOW" = "1" ]; then \
-        echo "[nemo-flow] Installing nemo-flow==${NEMO_FLOW_VERSION} from PyPI and patching Hermes" \
-        && curl -fsSL "https://raw.githubusercontent.com/NVIDIA/NeMo-Flow/${NEMO_FLOW_VERSION}/patches/hermes-agent/0001-add-nemo-flow-integration.patch" \
-             -o /tmp/nemo-flow.patch \
-        && curl -fsSL "https://github.com/NousResearch/hermes-agent/archive/${HERMES_NEMO_FLOW_COMMIT}.tar.gz" \
-             | tar -xz -C /tmp/ \
-        && mv "/tmp/hermes-agent-${HERMES_NEMO_FLOW_COMMIT}" /tmp/hermes-agent \
-        && git -C /tmp/hermes-agent init -q \
-        && git -C /tmp/hermes-agent apply /tmp/nemo-flow.patch \
-        && pip3 install --no-cache-dir --break-system-packages --force-reinstall \
-             "nemo-flow==${NEMO_FLOW_VERSION}" \
-             "/tmp/hermes-agent[nemo-flow,slack]" \
-             "pyyaml==6.0.3" \
-             "python-telegram-bot>=21.0" \
-             "httpx>=0.27" \
-             "slack-bolt>=1.19" \
-        && hermes --version \
-        && export PY_SITE_DIR="$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
-        && ln -sfn /usr/local/lib/nemoclaw-patches/sitecustomize.py "${PY_SITE_DIR}/sitecustomize.py" \
-        && rm -rf /tmp/hermes-agent /tmp/nemo-flow.patch; \
-    fi
+# Pin slack-bolt / python-telegram-bot / pyyaml / httpx into Hermes's venv
+# interpreter so the sitecustomize patches (Slack catch-all, SDK placeholder
+# rewrite) find the modules they wrap. hadolint ignore=DL3013
+RUN pip3 install --no-cache-dir --break-system-packages \
+       "pyyaml==6.0.3" \
+       "python-telegram-bot>=21.0" \
+       "httpx>=0.27" \
+       "slack-bolt>=1.19" \
+    && hermes --version \
+    && export PY_SITE_DIR="$(python3 -c 'import site; print(site.getsitepackages()[0])')" \
+    && ln -sfn /usr/local/lib/nemoclaw-patches/sitecustomize.py "${PY_SITE_DIR}/sitecustomize.py"
+
+# ── NeMo-Relay plugin config (immutable, baked at build time) ────────────
+# Discovery order: /etc/nemo-relay → project ./.nemo-relay → user XDG
+# (see NeMo-Relay crates/cli/src/config.rs). /etc/ is the cleanest location
+# for a containerized agent because it ignores CWD.
+#
+# Only plugins.toml is baked — observability component (ATIF + OpenInference).
+# The daemon doesn't need a config.toml here: --bind is passed explicitly by
+# start.sh, and the wrapped-CLI `[agents.hermes]` block isn't used in the
+# sidecar/daemon architecture (agents POST to the daemon; it doesn't launch
+# them).
+COPY agents/hermes/nemo-relay/plugins.toml.in /tmp/nemo-relay-plugins.toml.in
+RUN mkdir -p /etc/nemo-relay \
+    && PHOENIX_URL="${PHOENIX_COLLECTOR_ENDPOINT:-}" \
+    && if [ -z "$PHOENIX_URL" ]; then \
+         PHOENIX_ENABLED=false; PHOENIX_ENDPOINT=""; \
+       else \
+         # PHOENIX_COLLECTOR_ENDPOINT is consumed verbatim — the user supplies
+         # the full OTLP HTTP/binary URL (typically including the /v1/traces
+         # suffix). The trailing-slash strip is the only normalization. See
+         # .env.example and README for the documented value format.
+         PHOENIX_ENABLED=true; PHOENIX_ENDPOINT="${PHOENIX_URL%/}"; \
+       fi \
+    && sed -e "s|@@PHOENIX_ENABLED@@|${PHOENIX_ENABLED}|g" \
+           -e "s|@@PHOENIX_ENDPOINT@@|${PHOENIX_ENDPOINT}|g" \
+       /tmp/nemo-relay-plugins.toml.in > /etc/nemo-relay/plugins.toml \
+    && rm /tmp/nemo-relay-plugins.toml.in \
+    && chmod 444 /etc/nemo-relay/plugins.toml
 
 # Hermes v2026.4.13+ auto-detects HTTPS_PROXY and skips fallback-IP
 # transport when a proxy is present. The sandbox proxy chain
 # (decode-proxy → OpenShell L7 proxy) handles credential placeholder
 # rewriting and hostname-based policy enforcement. The Python preload
 # rewrites Slack SDK-shaped placeholders before HTTPS serialization.
+#
+# Only HERMES_HOME and HERMES_DISABLE_LAZY_INSTALLS reliably reach
+# user processes — OpenShell's exec-session allowlist strips most other
+# HERMES_* vars. PID-1 (start.sh-launched gateway) keeps everything;
+# HERMES_DISABLE_LAZY_INSTALLS is also re-exported from start.sh's
+# _PROXY_ENV_FILE so interactive shells get it.
 ENV HERMES_TELEGRAM_DISABLE_FALLBACK_IPS=1 \
+    HERMES_DISABLE_LAZY_INSTALLS=1 \
+    HERMES_HOME=/sandbox/.hermes-data \
     GH_TOKEN=openshell:resolve:env:GITHUB_TOKEN
 
 # Copy NemoClaw plugin for Hermes (Python-based)
-COPY agents/hermes/plugin/ /opt/nemoclaw-hermes-plugin/
+COPY agents/hermes/plugins/nemoclaw/ /opt/nemoclaw-hermes-plugin/
+
+# Copy nemo-relay plugin: in-process forwarder for pre/post_api_request
+# events that enriches NeMo-Relay hook payloads with the real OpenAI request
+# body and response body (the shell-hook path is metadata-only by design).
+# Requires Hermes >= v0.14.0 because earlier versions sanitized plugin kwargs.
+COPY agents/hermes/plugins/nemo-relay/ /opt/nemo-relay-hermes-plugin/
 
 # Copy bridges and default cron jobs.
 # Install under /usr/local/lib/ so Landlock's read_only /usr rule permits access.
@@ -175,6 +285,7 @@ RUN chmod 755 /usr/local/lib/nemoclaw-slack-shims/decode-proxy.py \
 # Ensure sandbox user can read all /opt/nemoclaw-* and bridge files.
 # Source files may have restrictive permissions that Docker COPY preserves.
 RUN chmod -R a+rX /opt/nemoclaw-hermes-plugin/ \
+    && chmod -R a+rX /opt/nemo-relay-hermes-plugin/ \
     && chmod a+r /opt/nemoclaw-generate-config.ts \
     && chmod -R a+rX /usr/local/lib/nemoclaw-bridges/
 
@@ -244,6 +355,11 @@ RUN node --experimental-strip-types /opt/nemoclaw-generate-config.ts
 RUN mkdir -p /sandbox/.hermes-data/plugins/nemoclaw \
     && cp -r /opt/nemoclaw-hermes-plugin/* /sandbox/.hermes-data/plugins/nemoclaw/
 
+# Install nemo-relay plugin into Hermes. HERMES_HOME=/sandbox/.hermes-data
+# (set in start.sh) and Hermes' plugin loader scans $HERMES_HOME/plugins/.
+RUN mkdir -p /sandbox/.hermes-data/plugins/nemo-relay \
+    && cp -r /opt/nemo-relay-hermes-plugin/* /sandbox/.hermes-data/plugins/nemo-relay/
+
 # Symlink SOUL.md into the immutable home so Hermes's ensure_hermes_home() finds it.
 RUN ln -s /sandbox/.hermes-data/SOUL.md /sandbox/.hermes/SOUL.md
 
@@ -257,6 +373,11 @@ RUN chown root:root /sandbox/.hermes \
     && chmod 755 /sandbox/.hermes \
     && chmod 444 /sandbox/.hermes/config.yaml \
     && chmod 444 /sandbox/.hermes/.env
+
+# Interactive `hermes` invocations resolve through a PATH-prepended shim at
+# /usr/local/lib/nemoclaw/bin/hermes (installed above). The shim blocks
+# setup/doctor and execs the upstream binary; NEMO_RELAY_GATEWAY_URL in env
+# carries telemetry to the sidecar.
 
 # Pin config hash at build time for integrity verification at startup.
 RUN sha256sum /sandbox/.hermes/config.yaml /sandbox/.hermes/.env \

@@ -113,6 +113,62 @@ function main(): void {
       mode: "smart",
       timeout: 60,
     },
+    // NeMo-Relay shell hooks — each event spawns `nemo-relay hook-forward hermes`,
+    // which reads the JSON payload from stdin and POSTs it to NEMO_RELAY_GATEWAY_URL
+    // (exported by start.sh into PID-1 hermes's launch env, pointing at the
+    // persistent sidecar gateway on 127.0.0.1:4040). Events are the intersection of
+    // NeMo-Relay's HERMES_HOOK_EVENTS (installer.rs) and Hermes's VALID_HOOKS
+    // (hermes_cli/plugins.py). NeMo-Relay's "api_request_error" and "subagent_start"
+    // are forward-looking — current Hermes only exposes "subagent_stop" and reports
+    // request errors via "post_api_request" payloads, so we omit them here to
+    // avoid "unknown hook event" warnings.
+    //
+    // pre_api_request / post_api_request and pre_tool_call / post_tool_call
+    // are NOT shell-forwarded. The in-process nemo-relay plugin
+    // (plugins/nemo-relay/) owns those events under Hermes v0.14.0: it
+    // receives the real `request_messages` list and the real `response` SDK
+    // object as kwargs for api_request, and synthesizes stable tool_call_ids
+    // for tool_call events to work around NeMo-Relay's adapters/mod.rs
+    // synthesizing a fresh UUID per call when Hermes' defensive
+    // `tool_call_id or ""` strips the id. The plugin forwards everything to
+    // NEMO_RELAY_GATEWAY_URL/hooks/hermes with payload.request.body /
+    // payload.response.raw_response / paired tool_call_id populated. The
+    // adapter then marks provider_payload_exact=true (api_request) and pairs
+    // pre/post tool events into a single Phoenix span. Shell-forwarding the
+    // same events alongside the plugin would create duplicate lossy-summary
+    // scopes on the gateway.
+    //
+    // `on_session_end` gets a SECOND command (`nemo-relay-finalize-hook`) that
+    // synthesizes a per-turn `on_session_finalize`. Hermes fires real finalize
+    // only from its idle-session expiry watcher (~5 min default), but
+    // NeMo-Relay's ATIF writer and root-span closer only act on finalize. The
+    // hook closes the agent scope every turn so each conversation produces a
+    // complete Phoenix root span and a fresh ATIF JSON file.
+    hooks: (() => {
+      const fwd = { command: "/usr/local/bin/nemo-relay hook-forward hermes", timeout: 30 };
+      const finalize_hook = { command: "/usr/local/lib/nemoclaw/bin/nemo-relay-finalize-hook", timeout: 30 };
+      const events = [
+        "on_session_start", "on_session_finalize", "on_session_reset",
+        "pre_llm_call", "post_llm_call",
+        "subagent_stop",
+      ];
+      const result: Record<string, unknown[]> = Object.fromEntries(events.map((ev) => [ev, [fwd]]));
+      result.on_session_end = [fwd, finalize_hook];
+      return result;
+    })(),
+    // Auto-accept the hook commands. The sandbox is non-interactive; without
+    // this the first hook fires a TTY consent prompt and gets skipped,
+    // dropping all observability silently. Safe here because config.yaml is
+    // root-owned + chmod 444 at build time.
+    hooks_auto_accept: true,
+    // Enable in-process Hermes plugins. nemoclaw provides sandbox status
+    // tools and the startup banner; nemo-relay owns the pre/post_api_request
+    // events (see hooks comment above). Belt-and-suspenders against
+    // config-migration changes — v0.14.0 also auto-discovers plugins under
+    // $HERMES_HOME/plugins/, but explicit enablement survives schema bumps.
+    plugins: {
+      enabled: ["nemoclaw", "nemo-relay"],
+    },
   };
 
   // Messaging platforms (if configured during onboard)

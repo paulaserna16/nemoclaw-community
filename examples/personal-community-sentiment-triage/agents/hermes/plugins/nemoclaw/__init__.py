@@ -96,7 +96,7 @@ def _handle_status(tool_input, **kwargs):
     The ``**kwargs`` swallows the context fields (``task_id``, ``session_id``,
     ``tool_call_id``, ``parent_agent``) that ``tools/registry.dispatch``
     forwards to every handler — see ``handler(args, **kwargs)`` at
-    ``tools/registry.py:306``. Without this, calls fail with
+    ``tools/registry.py``. Without this, calls fail with
     ``TypeError: got an unexpected keyword argument 'task_id'`` and the
     tool surfaces an error to the user instead of running.
     """
@@ -226,28 +226,7 @@ def register(ctx):
         description="Reload skills from disk without gateway restart",
     )
 
-    # Startup banner on session start
     def _on_session_start(**kwargs):
-        # Refresh skill cache so skills installed since last session are
-        # immediately available as slash commands.
         _reload_skills()
-
-        info = _get_sandbox_info()
-        banner = (
-            "\n"
-            "  \u250c\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2510\n"
-            "  \u2502  NemoClaw registered (Hermes)                       \u2502\n"
-            "  \u2502                                                     \u2502\n"
-            f"  \u2502  Model:     {info['model']:<40}\u2502\n"
-            f"  \u2502  Provider:  {info['provider']:<40}\u2502\n"
-            f"  \u2502  Gateway:   {info['gateway']:<40}\u2502\n"
-            "  \u2502  Tools:     nemoclaw_status, nemoclaw_info,         \u2502\n"
-            "  \u2502             nemoclaw_reload_skills                   \u2502\n"
-            "  \u2514\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2500\u2518\n"
-        )
-        try:
-            ctx.inject_message(banner, role="system")
-        except Exception:
-            print(banner)
 
     ctx.register_hook("on_session_start", _on_session_start)

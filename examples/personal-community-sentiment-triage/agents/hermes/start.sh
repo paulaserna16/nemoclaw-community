@@ -112,7 +112,7 @@ PUBLIC_PORT=8642
 # Hermes binds to 127.0.0.1 regardless of config (upstream bug).
 # Run it on an internal port and use socat to expose on PUBLIC_PORT.
 INTERNAL_PORT=18642
-HERMES="$(command -v hermes)" # Resolve once, use absolute path everywhere
+NEMO_RELAY_GATEWAY_PORT=4040  # upstream default (crates/cli/src/config.rs)
 
 # Hermes writes state files (PID, state.db, .channel_directory) directly into
 # HERMES_HOME. We cannot point it at the immutable /sandbox/.hermes dir.
@@ -205,97 +205,6 @@ PYPLACEHOLDERS
   echo "[config] Refreshed Hermes provider placeholders from OpenShell runtime env" >&2
 }
 
-# Atomic temp-file-then-mv rewrite of an rc-file marker block. Refuses
-# symlinks. Mirrors upstream NemoClaw's rewrite_rc_marker_block.
-rewrite_rc_marker_block() {
-  local rc_file="$1"
-  local marker_begin="$2"
-  local marker_end="$3"
-  local snippet="${4:-}"
-  local dir base tmp
-
-  [ -e "$rc_file" ] || return 0
-  if [ -L "$rc_file" ] || [ ! -f "$rc_file" ]; then
-    echo "[SECURITY] refusing unsafe rc file: $rc_file" >&2
-    return 1
-  fi
-
-  dir="$(dirname "$rc_file")"
-  base="$(basename "$rc_file")"
-  tmp="$(mktemp "${dir}/.${base}.tmp.XXXXXX")" || return 1
-
-  awk -v b="$marker_begin" -v e="$marker_end" \
-    '$0==b{s=1;next} $0==e{s=0;next} !s' "$rc_file" >"$tmp" 2>/dev/null || {
-    rm -f "$tmp"
-    return 1
-  }
-
-  if [ -n "$snippet" ]; then
-    printf '%s\n' "$snippet" >>"$tmp" || {
-      rm -f "$tmp"
-      return 1
-    }
-  fi
-
-  if [ "$(id -u)" -eq 0 ] && ! chown root:root "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
-  chmod 644 "$tmp" 2>/dev/null || true
-
-  if [ -L "$rc_file" ]; then
-    echo "[SECURITY] refusing symlinked rc file during replace: $rc_file" >&2
-    rm -f "$tmp"
-    return 1
-  fi
-  mv -f "$tmp" "$rc_file" 2>/dev/null || {
-    rm -f "$tmp"
-    return 1
-  }
-}
-
-rewrite_rc_marker_block_or_fail_in_root() {
-  local rc_file="$1"
-  if rewrite_rc_marker_block "$@"; then
-    return 0
-  fi
-  if [ "$(id -u)" -eq 0 ]; then
-    return 1
-  fi
-  echo "[setup] could not update rc file ${rc_file}; continuing in non-root mode" >&2
-  return 0
-}
-
-install_configure_guard() {
-  local marker_begin="# nemoclaw-configure-guard begin"
-  local marker_end="# nemoclaw-configure-guard end"
-  local snippet
-  read -r -d '' snippet <<'GUARD' || true
-# nemoclaw-configure-guard begin
-hermes() {
-  case "$1" in
-    setup|doctor)
-      echo "Error: 'hermes $1' cannot modify config inside the sandbox." >&2
-      echo "NemoClaw manages sandbox config from the host for integrity checks." >&2
-      echo "" >&2
-      echo "To change your configuration, exit the sandbox and run:" >&2
-      echo "  nemoclaw onboard --resume" >&2
-      return 1
-      ;;
-  esac
-  command hermes "$@"
-}
-# nemoclaw-configure-guard end
-GUARD
-
-  for rc_file in "${_SANDBOX_HOME}/.bashrc" "${_SANDBOX_HOME}/.profile"; do
-    [ -f "$rc_file" ] || continue
-    rewrite_rc_marker_block_or_fail_in_root "$rc_file" "$marker_begin" "$marker_end" "$snippet"
-  done
-  # Lock .bashrc/.profile after all mutations are complete (best-effort in non-root).
-  lock_rc_files "$_SANDBOX_HOME"
-}
-
 _has_outlook_channel() {
   # Primary: OUTLOOK_CLIENT_ID is injected by OpenShell providers at runtime,
   # making it a reliable signal that the Outlook channel was configured.
@@ -331,6 +240,25 @@ print_dashboard_urls() {
 start_gateway_log_stream() {
   { tail -n +1 -F /tmp/gateway.log 2>/dev/null | sed -u 's/^/[gateway-log:] /' >&2; } &
   GATEWAY_LOG_TAIL_PID=$!
+}
+
+# Force the OpenInference BatchSpanProcessor (OpenTelemetry SDK 0.31, used
+# by nemo-relay's HTTP exporter at
+# crates/core/src/observability/openinference.rs) to flush every
+# span immediately instead of batching for 5 seconds. Without these, real
+# multi-scope Hermes turns produce a single larger POST that the OpenShell
+# L7 proxy appears to acknowledge with 200 but not forward to Phoenix,
+# causing silent span loss. With BSP_MAX_EXPORT_BATCH_SIZE=1 every span
+# becomes a small single-span POST, matching the manual-probe shape that
+# we confirmed lands cleanly. Tracked upstream as missing force_flush()
+# on turn boundary in nemo-relay's session.rs end_turn().
+#
+# Exports into the parent shell so both privilege paths inherit the same
+# values without duplicating the rationale at each call site.
+_export_otel_bsp_tunings() {
+  export OTEL_BSP_MAX_EXPORT_BATCH_SIZE=1
+  export OTEL_BSP_SCHEDULE_DELAY=100
+  export OTEL_BSP_EXPORT_TIMEOUT=2000
 }
 
 # ── socat forwarder ──────────────────────────────────────────────
@@ -383,6 +311,43 @@ start_decode_proxy() {
     attempts=$((attempts + 1))
   done
   echo "[gateway] decode-proxy failed to start — placeholder rewriting may not work" >&2
+}
+
+# ── NeMo-Relay sidecar gateway ──────────────────────────────────
+NEMO_RELAY_PID=""
+start_nemo_relay_sidecar() {
+  if ! [ -x /usr/local/bin/nemo-relay ]; then
+    echo "[nemo-relay] binary not found at /usr/local/bin/nemo-relay, skipping" >&2
+    return 0
+  fi
+  _export_otel_bsp_tunings
+  if [ "$(id -u)" -eq 0 ]; then
+    nohup gosu gateway /usr/local/bin/nemo-relay \
+      --bind "127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}" \
+      >>/tmp/nemo-relay.log 2>&1 &
+  else
+    nohup /usr/local/bin/nemo-relay \
+      --bind "127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}" \
+      >>/tmp/nemo-relay.log 2>&1 &
+  fi
+  NEMO_RELAY_PID=$!
+  # Wait for /healthz so PID-1 hermes doesn't race the sidecar (silent drops).
+  local attempts=0
+  while [ "$attempts" -lt 30 ]; do
+    if curl -sf "http://127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}/healthz" >/dev/null 2>&1; then
+      echo "[nemo-relay] sidecar healthy on 127.0.0.1:${NEMO_RELAY_GATEWAY_PORT} (pid $NEMO_RELAY_PID)" >&2
+      return 0
+    fi
+    sleep 0.5
+    attempts=$((attempts + 1))
+  done
+  # Fail-hard: silent telemetry loss is worse than a noisy startup failure.
+  # Surface the sidecar's own log so the operator doesn't have to dig.
+  echo "[nemo-relay] FATAL: sidecar did not become healthy within 15s (pid $NEMO_RELAY_PID)" >&2
+  echo "[nemo-relay] --- last 30 lines of /tmp/nemo-relay.log ---" >&2
+  tail -n 30 /tmp/nemo-relay.log >&2 2>/dev/null || echo "[nemo-relay] (log unreadable)" >&2
+  echo "[nemo-relay] --- end log ---" >&2
+  exit 1
 }
 
 # Outlook bridge / MS Graph sidecar PIDs (populated at launch).
@@ -495,14 +460,6 @@ export OUTLOOK_CLIENT_ID="${OUTLOOK_CLIENT_ID:-openshell:resolve:env:OUTLOOK_CLI
 export OUTLOOK_SESSION_UUID="${OUTLOOK_SESSION_UUID:-openshell:resolve:env:OUTLOOK_SESSION_UUID}"
 export MS_GRAPH_SIDECAR_URL="http://127.0.0.1:${SIDECAR_PORT}"
 
-# Resolve sandbox home dir early — used by install_configure_guard below.
-if [ "$(id -u)" -eq 0 ]; then
-  _SANDBOX_HOME=$(getent passwd sandbox 2>/dev/null | cut -d: -f6)
-  _SANDBOX_HOME="${_SANDBOX_HOME:-/sandbox}"
-else
-  _SANDBOX_HOME="${HOME:-/sandbox}"
-fi
-
 # SECURITY FIX: Write proxy + tool env to a standalone file via
 # emit_sandbox_sourced_file() (root:root 444) instead of appending
 # inline to .bashrc/.profile. The old approach left .bashrc writable
@@ -525,6 +482,10 @@ export GITHUB_TOKEN="${GITHUB_TOKEN:-openshell:resolve:env:GITHUB_TOKEN}"
 export OUTLOOK_CLIENT_ID="${OUTLOOK_CLIENT_ID:-openshell:resolve:env:OUTLOOK_CLIENT_ID}"
 export OUTLOOK_SESSION_UUID="${OUTLOOK_SESSION_UUID:-openshell:resolve:env:OUTLOOK_SESSION_UUID}"
 export MS_GRAPH_SIDECAR_URL="http://127.0.0.1:${SIDECAR_PORT}"
+export NEMO_RELAY_GATEWAY_URL="http://127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}"
+export PATH="/usr/local/lib/nemoclaw/bin:\$PATH"
+export HERMES_TUI_THEME=dark
+export HERMES_DISABLE_LAZY_INSTALLS=1
 PROXYEOF
   for _ca_env_name in SSL_CERT_FILE CURL_CA_BUNDLE REQUESTS_CA_BUNDLE GIT_SSL_CAINFO; do
     _ca_env_value="${!_ca_env_name:-}"
@@ -550,7 +511,6 @@ if [ "$(id -u)" -ne 0 ]; then
   fi
   deploy_config_to_writable
   refresh_hermes_provider_placeholders
-  install_configure_guard
   configure_messaging_channels
 
   if [ ${#NEMOCLAW_CMD[@]} -gt 0 ]; then
@@ -565,19 +525,16 @@ if [ "$(id -u)" -ne 0 ]; then
 
   # Prepare ATIF telemetry directory (ephemeral, writable by the current user).
   mkdir -p /tmp/atif
-  # Detect NeMo-Flow by package availability — more reliable than env var inheritance.
-  if python3 -c "import nemo_flow" 2>/dev/null; then
-    NEMO_FLOW_ENABLED=1
+  # NeMo-Relay observability is configured via /etc/nemo-relay/plugins.toml
+  # (baked at image build time). Verify the binary and config are present.
+  if [ -x /usr/local/bin/nemo-relay ] && [ -r /etc/nemo-relay/plugins.toml ]; then
+    echo "[nemo-relay] binary + config present (plugins.toml=/etc/nemo-relay/plugins.toml)" | tee -a /tmp/gateway.log >&2
   else
-    NEMO_FLOW_ENABLED=0
+    echo "[nemo-relay] WARNING: binary or config missing — telemetry disabled" | tee -a /tmp/gateway.log >&2
   fi
-  {
-    echo "[nemo-flow] NEMO_FLOW_ENABLED=${NEMO_FLOW_ENABLED}"
-    echo "[nemo-flow] PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT:-<unset>}"
-  } | tee -a /tmp/gateway.log >&2
-  PHOENIX_OPENINFERENCE_ENABLED=0
-  [ -n "${PHOENIX_COLLECTOR_ENDPOINT:-}" ] && PHOENIX_OPENINFERENCE_ENABLED=1
-  echo "[nemo-flow] PHOENIX_OPENINFERENCE_ENABLED=${PHOENIX_OPENINFERENCE_ENABLED}" | tee -a /tmp/gateway.log >&2
+
+  # Sidecar must be healthy before PID-1 hermes starts (else first-turn drops).
+  start_nemo_relay_sidecar
 
   HERMES_HOME="${HERMES_WRITABLE}" \
     HTTPS_PROXY="${_PROXY_URL}" \
@@ -585,15 +542,9 @@ if [ "$(id -u)" -ne 0 ]; then
     https_proxy="${_PROXY_URL}" \
     http_proxy="${_PROXY_URL}" \
     PYTHONPATH="${PATCHES_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
-    HERMES_NEMO_FLOW_ENABLED="${NEMO_FLOW_ENABLED:-0}" \
-    HERMES_NEMO_FLOW_ATIF_DIR="/tmp/atif" \
-    HERMES_NEMO_FLOW_ACG_ENABLED="0" \
-    HERMES_NEMO_FLOW_OPENINFERENCE_ENABLED="${PHOENIX_OPENINFERENCE_ENABLED}" \
-    HERMES_NEMO_FLOW_OPENINFERENCE_TRANSPORT="http_binary" \
-    HERMES_NEMO_FLOW_OPENINFERENCE_ENDPOINT="${PHOENIX_COLLECTOR_ENDPOINT:-}" \
-    HERMES_NEMO_FLOW_OPENINFERENCE_SERVICE_NAME="hermes-agent" \
     API_SERVER_KEY="nemoclaw-internal" \
-    nohup "$HERMES" gateway run >>/tmp/gateway.log 2>&1 &
+    NEMO_RELAY_GATEWAY_URL="http://127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}" \
+    nohup hermes gateway run >>/tmp/gateway.log 2>&1 &
   GATEWAY_PID=$!
   echo "[gateway] hermes gateway launched (pid $GATEWAY_PID)" >&2
   start_gateway_log_stream
@@ -602,6 +553,7 @@ if [ "$(id -u)" -ne 0 ]; then
   # registration and the final append is a small race window (same as before
   # the shared-library refactor). Acceptable for entrypoint-level cleanup.
   SANDBOX_CHILD_PIDS=("$GATEWAY_PID")
+  [ -n "${NEMO_RELAY_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$NEMO_RELAY_PID")
   [ -n "${GATEWAY_LOG_TAIL_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$GATEWAY_LOG_TAIL_PID")
   # shellcheck disable=SC2034  # read by cleanup_on_signal from sandbox-init.sh
   SANDBOX_WAIT_PID="$GATEWAY_PID"
@@ -624,7 +576,6 @@ fi
 verify_config_integrity "${HERMES_IMMUTABLE}" "${HERMES_HASH_FILE}"
 deploy_config_to_writable
 refresh_hermes_provider_placeholders
-install_configure_guard
 configure_messaging_channels
 
 if [ ${#NEMOCLAW_CMD[@]} -gt 0 ]; then
@@ -638,19 +589,13 @@ prepare_restricted_log /tmp/gateway.log gateway:gateway 600
 # gateway user (launched via gosu below) can write to it.
 mkdir -p /tmp/atif
 chown gateway:gateway /tmp/atif
-# Detect NeMo-Flow by package availability — more reliable than env var inheritance.
-if python3 -c "import nemo_flow" 2>/dev/null; then
-  NEMO_FLOW_ENABLED=1
+# NeMo-Relay observability is configured via /etc/nemo-relay/plugins.toml
+# (baked at image build time). Verify the binary and config are present.
+if [ -x /usr/local/bin/nemo-relay ] && [ -r /etc/nemo-relay/plugins.toml ]; then
+  echo "[nemo-relay] binary + config present (plugins.toml=/etc/nemo-relay/plugins.toml)" | tee -a /tmp/gateway.log >&2
 else
-  NEMO_FLOW_ENABLED=0
+  echo "[nemo-relay] WARNING: binary or config missing — telemetry disabled" | tee -a /tmp/gateway.log >&2
 fi
-{
-  echo "[nemo-flow] NEMO_FLOW_ENABLED=${NEMO_FLOW_ENABLED}"
-  echo "[nemo-flow] PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT:-<unset>}"
-} | tee -a /tmp/gateway.log >&2
-PHOENIX_OPENINFERENCE_ENABLED=0
-[ -n "${PHOENIX_COLLECTOR_ENDPOINT:-}" ] && PHOENIX_OPENINFERENCE_ENABLED=1
-echo "[nemo-flow] PHOENIX_OPENINFERENCE_ENABLED=${PHOENIX_OPENINFERENCE_ENABLED}" | tee -a /tmp/gateway.log >&2
 
 # Defence-in-depth: verify /tmp file permissions before launching services.
 # shellcheck disable=SC2119
@@ -662,22 +607,22 @@ validate_config_symlinks "${HERMES_IMMUTABLE}" "${HERMES_WRITABLE}"
 # Lock .hermes directory after validation.
 harden_config_symlinks "${HERMES_IMMUTABLE}" "hermes"
 
-# Start the gateway as the 'gateway' user.
+# Sidecar must be healthy before PID-1 hermes starts (else first-turn drops).
+start_nemo_relay_sidecar
+
+# NEMO_RELAY_GATEWAY_URL must be in the explicit launch env — PID-1 hermes
+# does not read _PROXY_ENV_FILE, and Slack/Outlook bridge-driven turns funnel
+# through this process to emit telemetry.
 HERMES_HOME="${HERMES_WRITABLE}" \
   HTTPS_PROXY="${_PROXY_URL}" \
   HTTP_PROXY="${_PROXY_URL}" \
   https_proxy="${_PROXY_URL}" \
   http_proxy="${_PROXY_URL}" \
   PYTHONPATH="${PATCHES_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
-  HERMES_NEMO_FLOW_ENABLED="${NEMO_FLOW_ENABLED:-0}" \
-  HERMES_NEMO_FLOW_ATIF_DIR="/tmp/atif" \
-  HERMES_NEMO_FLOW_ACG_ENABLED="0" \
-  HERMES_NEMO_FLOW_OPENINFERENCE_ENABLED="${PHOENIX_OPENINFERENCE_ENABLED}" \
-  HERMES_NEMO_FLOW_OPENINFERENCE_TRANSPORT="http_binary" \
-  HERMES_NEMO_FLOW_OPENINFERENCE_ENDPOINT="${PHOENIX_COLLECTOR_ENDPOINT:-}" \
-  HERMES_NEMO_FLOW_OPENINFERENCE_SERVICE_NAME="hermes-agent" \
   API_SERVER_KEY="nemoclaw-internal" \
-  nohup gosu gateway "$HERMES" gateway run >>/tmp/gateway.log 2>&1 &
+  NEMO_RELAY_GATEWAY_URL="http://127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}" \
+  nohup gosu gateway hermes gateway run \
+    >>/tmp/gateway.log 2>&1 &
 GATEWAY_PID=$!
 echo "[gateway] hermes gateway launched as 'gateway' user (pid $GATEWAY_PID)" >&2
 start_gateway_log_stream
@@ -686,6 +631,7 @@ start_gateway_log_stream
 # registration and the final append is a small race window (same as before
 # the shared-library refactor). Acceptable for entrypoint-level cleanup.
 SANDBOX_CHILD_PIDS=("$GATEWAY_PID")
+[ -n "${NEMO_RELAY_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$NEMO_RELAY_PID")
 [ -n "${DECODE_PROXY_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$DECODE_PROXY_PID")
 [ -n "${GATEWAY_LOG_TAIL_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$GATEWAY_LOG_TAIL_PID")
 # shellcheck disable=SC2034  # read by cleanup_on_signal from sandbox-init.sh

@@ -13,9 +13,9 @@ NemoClaw is the blueprint layer for composing three things into a repeatable age
 
 The examples in this repository demonstrate complete blueprint patterns: they show how a model is wired to a harness, how the harness is packaged with skills and integrations, and how OpenShell constrains and runs the resulting agent.
 
-## Demos
+## Reference Examples
 
-Some demos are included in this repository. Others currently live in [brevdev/nemoclaw-demos](https://github.com/brevdev/nemoclaw-demos) and are candidates for future consolidation here.
+Some examples are included in this repository. Others currently live in [brevdev/nemoclaw-demos](https://github.com/brevdev/nemoclaw-demos) and are candidates for future consolidation here.
 
 | Demo | Description | Link |
 | ---- | ----------- | ---- |
@@ -37,7 +37,7 @@ git clone https://github.com/NVIDIA/nemoclaw-community.git
 cd nemoclaw-community
 ```
 
-For external demos, follow the linked guide in `brevdev/nemoclaw-demos`. Each demo documents its own host requirements, credentials, setup steps, and OpenShell policy details.
+For other examples, follow the linked guide in `brevdev/nemoclaw-demos`. Each demo documents its own host requirements, credentials, setup steps, and OpenShell policy details.
 
 ## Requirements
 

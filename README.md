@@ -13,24 +13,31 @@ NemoClaw is the blueprint layer for composing three things into a repeatable age
 
 The examples in this repository demonstrate complete blueprint patterns: they show how a model is wired to a harness, how the harness is packaged with skills and integrations, and how OpenShell constrains and runs the resulting agent.
 
-## What's Here
+## Reference Examples
 
-| Directory | Description |
-| --------- | ----------- |
-| `examples/personal-community-sentiment-triage/` | NemoClaw blueprint example pairing a Hermes harness with an OpenShell sandbox and community-signal integrations across Slack, Outlook, live read-only GitHub REST, GitHub discussion mirrors, and NVIDIA forum mirrors. |
-| `scripts/` | Repository maintenance checks used by CI. |
+Some examples are included in this repository. Others currently live in [brevdev/nemoclaw-demos](https://github.com/brevdev/nemoclaw-demos) and are candidates for future consolidation here.
+
+| Example | Description | Link |
+| ---- | ----------- | ---- |
+| Personal Community Sentiment Triage | Pairs a Hermes harness with an OpenShell sandbox and community-signal integrations across Slack, Outlook, live read-only GitHub REST, GitHub discussion mirrors, and NVIDIA forum mirrors. | [Guide](examples/personal-community-sentiment-triage/README.md) |
+| Hermes Brev Launchable | Provides a notebook path from a fresh Brev CPU instance to a working NemoClaw-managed Hermes sandbox, including installation, onboarding, API verification, and terminal access. | [Guide](examples/hermes-launchable/README.md) |
+| OpenClaw Omni Example | Sets up a NemoClaw sandbox with a Nemotron Omni vision sub-agent, including reference OpenClaw configuration, policy, agent instructions, and verification scripts. | [Guide](https://github.com/brevdev/nemoclaw-demos/blob/main/openclaw-omni-demo/README.md) |
+| Hermes Omni Example | Builds a local multimodal Hermes agent that can inspect video, audio, images, and PDFs through Nemotron Omni while running inside an OpenShell-constrained sandbox. | [Guide](https://github.com/brevdev/nemoclaw-demos/blob/main/hermes-omni-demo/hermes-omni-guide.md) |
+| Flight Tracking Example | Adds a live airspace console with real-time aircraft data, map controls, aviation overlays, and an agent skill that operates through host-side proxies. | [Guide](https://github.com/brevdev/nemoclaw-demos/blob/main/flight-tracking-demo/flight-tracking-guide.md) |
+| Google Workspace Integration | Connects a NemoClaw agent to Gmail, Calendar, Drive, Docs, Sheets, Contacts, and Tasks through a host-side credential flow and sandbox-deployed tools. | [Guide](https://github.com/brevdev/nemoclaw-demos/blob/main/google-workspace-demo/google-workspace-guide.md) |
+| Planet Integration | Gives the agent read-only access to Planet imagery workflows, including catalog search, thumbnails, tasking estimates, pass availability, and account quota checks. | [Guide](https://github.com/brevdev/nemoclaw-demos/blob/main/planet-integration-demo/planet-integration-guide.md) |
+| Wakeup Example | Adds a host-controlled schedule that wakes the sandboxed agent at fixed intervals to follow a task list without letting the agent control its own timer. | [Guide](https://github.com/brevdev/nemoclaw-demos/blob/main/wakeup-demo/nemoclaw-wakeup-guide.md) |
 
 ## Getting Started
 
-Install the OpenShell CLI and move into the example:
+Choose an example from the table above and follow its guide. To run an example from this repository, clone the repo first:
 
 ```bash
 git clone https://github.com/NVIDIA/nemoclaw-community.git
-cd nemoclaw-community/examples/personal-community-sentiment-triage
-curl -LsSf https://raw.githubusercontent.com/NVIDIA/OpenShell/main/install.sh | OPENSHELL_VERSION=v0.0.38 sh
+cd nemoclaw-community
 ```
 
-Then follow the full setup guide in [examples/personal-community-sentiment-triage/README.md](examples/personal-community-sentiment-triage/README.md).
+For other examples, follow the linked guide in `brevdev/nemoclaw-demos`. Each example documents its own host requirements, credentials, setup steps, and OpenShell policy details.
 
 ## Requirements
 

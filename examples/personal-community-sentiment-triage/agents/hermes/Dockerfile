@@ -10,50 +10,30 @@
 # so Docker treats them as global build args (multi-stage scoping rule).
 ARG BASE_IMAGE=ghcr.io/nvidia/nemoclaw/hermes-sandbox-base@sha256:f76a2ed0509570b1ce5380327c7ebe2e120e97f524e9271e145d2ea34c83ba5e
 
-# ── Stage 0: build the MS Graph API sidecar binary ────────────────────────────
-# PyInstaller produces a self-contained executable at a unique path
-# (/usr/local/bin/ms-graph-sidecar), distinct from /usr/bin/python3,
-# enabling OpenShell binary-path policy enforcement to restrict token-manager
-# access to the sidecar only.
-#
-# IMPORTANT: build inside ${BASE_IMAGE}, not python:3.12-slim, so the compiled
-# binary links against the same glibc as the runtime. Using a newer builder
-# image (e.g. Debian trixie glibc 2.41) produces a binary that crashes on the
-# Ubuntu 22.04 runtime (glibc 2.35) with "GLIBC_2.38 not found".
-FROM ${BASE_IMAGE} AS sidecar-builder
-RUN apt-get update -qq \
-    && export PY_MINOR="$(python3 -c 'import sys; print(f"{sys.version_info.major}.{sys.version_info.minor}")')" \
-    && apt-get install -y --no-install-recommends "libpython${PY_MINOR}" binutils python3-pip \
-    && rm -rf /var/lib/apt/lists/*
-RUN pip3 install --no-cache-dir --break-system-packages aiohttp pyinstaller
-COPY agents/hermes/sidecars/ms_graph_sidecar/ms_graph_sidecar.py /build/
-WORKDIR /build
-RUN pyinstaller \
-      --onefile \
-      --name ms-graph-sidecar \
-      --hidden-import aiohttp \
-      --hidden-import aiohttp.web \
-      ms_graph_sidecar.py
-
-# ── Stage 1: build the nemo-relay CLI binary ──────────────────────────────────
-# Built inside ${BASE_IMAGE} so the resulting binary links against the same
-# glibc as the runtime — same constraint as the sidecar-builder stage above.
-# 0.3.0-beta.2 is the first NeMo-Relay release on crates.io (the predecessor
-# crate `nemo-flow-cli` was published through 0.2.0 before the project's rename
-# from NeMo-Flow). `cargo install` is the simplest reproducible path; the
-# ~3-5 min toolchain bootstrap is amortized across the cargo target cache when
-# the version pin doesn't change.
+# ── Stage 0: binstall the pinned, prebuilt nemo-relay CLI (no source build) ────
+# Upstream publishes musl-static CLI release assets (zero glibc linkage), so the
+# binary loads on the glibc-2.35 runtime regardless of build host — no in-base-
+# image compile needed. cargo-binstall auto-detects host arch + libc and resolves
+# the matching release asset, so no architecture is named here; the build is
+# always native (openshell builds with no --platform), so host arch == target.
+# 0.3.0 includes the S3 ATIF export plugin (NVIDIA/NeMo-Relay#163), pulled in
+# unconditionally via the cli crate's `object-store` feature.
 FROM ${BASE_IMAGE} AS nemo-relay-builder
-ARG NEMO_RELAY_CLI_VERSION=0.3.0-beta.2
-RUN apt-get update -qq \
-    && apt-get install -y --no-install-recommends \
-       build-essential ca-certificates curl pkg-config libssl-dev \
+ARG NEMO_RELAY_CLI_VERSION=0.3.0
+# PATH includes cargo's bin dir so the install script's --self-install step
+# finds it (silences its cosmetic "path is missing /root/.cargo/bin" warning)
+# and cargo-binstall resolves by name on the next line.
+RUN export PATH="/root/.cargo/bin:$PATH" \
+    && apt-get update -qq \
+    && apt-get install -y --no-install-recommends ca-certificates curl \
     && rm -rf /var/lib/apt/lists/* \
-    && curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs \
-       | sh -s -- -y --default-toolchain stable --profile minimal \
-    && /root/.cargo/bin/cargo install --locked --root /out \
-       nemo-relay-cli --version "${NEMO_RELAY_CLI_VERSION}"
-# Produces /out/bin/nemo-relay
+    && curl -L --proto '=https' --tlsv1.2 -sSf \
+       https://raw.githubusercontent.com/cargo-bins/cargo-binstall/main/install-from-binstall-release.sh | bash \
+    && cargo-binstall --no-confirm --strategies crate-meta-data \
+       --install-path /out/bin "nemo-relay-cli@${NEMO_RELAY_CLI_VERSION}"
+# --strategies crate-meta-data: only resolve the crate's own [metadata.binstall]
+# release asset; fail loud (no silent source recompile) if none matches the host.
+# Produces /out/bin/nemo-relay (musl-static; runs on any glibc/musl Linux)
 
 # ── Main sandbox image ────────────────────────────────────────────────────────
 FROM ${BASE_IMAGE}
@@ -71,30 +51,11 @@ ENV PHOENIX_COLLECTOR_ENDPOINT=${PHOENIX_COLLECTOR_ENDPOINT}
 ARG PHOENIX_PROJECT_NAME="default"
 ENV PHOENIX_PROJECT_NAME=${PHOENIX_PROJECT_NAME}
 
-# Host address of the Outlook token manager (port 8765).
-# Baked at image build time using the same pattern as PHOENIX_COLLECTOR_ENDPOINT —
-# start.sh reads it as a real env var so the sidecar can open a TCP connection
-# without going through the OpenShell provider placeholder mechanism.
-# Default works with the package-managed and snap-managed OpenShell gateway
-# services, which expose host-routed services at host.openshell.internal.
-ARG TOKEN_MANAGER_HOST=host.openshell.internal
-ENV TOKEN_MANAGER_HOST=${TOKEN_MANAGER_HOST}
-
-# Install the MS Graph sidecar binary from the builder stage.
-# The distinct binary path enables OpenShell binary-path policy enforcement.
-COPY --from=sidecar-builder /build/dist/ms-graph-sidecar /usr/local/bin/ms-graph-sidecar
-RUN chmod 755 /usr/local/bin/ms-graph-sidecar
-
 # Harden: remove unnecessary build tools and network probes
 RUN (apt-get remove --purge -y gcc gcc-12 g++ g++-12 cpp cpp-12 make \
         netcat-openbsd netcat-traditional ncat 2>/dev/null || true) \
     && apt-get autoremove --purge -y \
     && rm -rf /var/lib/apt/lists/*
-
-# Add dedicated user for the MS Graph sidecar (uid 1001).
-# Running as a separate user from the sandbox (uid 1000) prevents the Hermes
-# agent from accessing the sidecar's process memory via /proc.
-RUN adduser --disabled-password --gecos "" --uid 1001 ms-graph-proxy
 
 # Optional: register additional trusted CA certificates inside the sandbox.
 # Drop *.crt files into the example-root certs/ directory before building —
@@ -102,6 +63,17 @@ RUN adduser --disabled-password --gecos "" --uid 1001 ms-graph-proxy
 # interception. Empty by default; update-ca-certificates is a safe no-op
 # when no .crt files are present. See certs/README.md for details.
 COPY certs/ /usr/local/share/ca-certificates/
+
+# Trust the host-side atif-export-relay CA cert (generated by
+# scripts/00-host-services.sh via extras/atif-export-relay/generate-tls-
+# cert.sh as the issuer of the relay's leaf cert). The L7 proxy's
+# rustls outbound to the relay validates the presented leaf cert against
+# this CA in the system bundle. (Earlier versions of generate-tls-cert.sh
+# produced a single self-signed cert that rustls 0.23+ rejected for
+# RFC 5280 §4.2.1.9 violations — see generate-tls-cert.sh comments.)
+COPY extras/atif-export-relay/tls/ca.crt \
+     /usr/local/share/ca-certificates/atif-export-relay-ca.crt
+
 RUN update-ca-certificates
 
 # Install GitHub CLI (gh) — not in the base image. It is not allowed in the
@@ -117,7 +89,7 @@ RUN mkdir -p /etc/apt/keyrings \
     && apt-get install -y --no-install-recommends gh postgresql-client \
     && rm -rf /var/lib/apt/lists/*
 
-RUN pip3 install --no-cache-dir --break-system-packages "httpx>=0.27" "markdown-it-py>=3"
+RUN pip3 install --no-cache-dir --break-system-packages "httpx>=0.27" "markdown-it-py>=3" "aiohttp>=3.10,<4" "aiofiles>=23.2,<25"
 
 # ── Upgrade Hermes from base image's v0.11.0 to v0.14.0 ─────────────────
 # NemoClaw's base image (even at its latest tag) pins HERMES_VERSION=v2026.4.23
@@ -180,9 +152,11 @@ RUN set -eu \
 # OpenInference traces to Phoenix.
 #
 # agents/hermes/patches/ is example-owned (not in NeMo-Relay upstream). It
-# holds the PYTHONPATH-targeted sitecustomize.py bootstrap that monkey-patches
-# urllib/requests/httpx/aiohttp to rewrite Slack token placeholders at egress
-# and installs a catch-all handler for non-/hermes Slack slash commands.
+# holds the PYTHONPATH-targeted sitecustomize.py bootstrap that patches
+# Hermes's Slack adapter with a catch-all slash-command handler so workspace-
+# specific commands (e.g. /my-assistant) get a friendly response instead of
+# Slack's "Unhandled request" warning. The OpenShell L7 proxy handles all
+# credential placeholder rewriting natively now — no Python-side facade.
 COPY --from=nemo-relay-builder /out/bin/nemo-relay /usr/local/bin/nemo-relay
 RUN chmod 755 /usr/local/bin/nemo-relay
 
@@ -203,11 +177,17 @@ RUN chmod 755 /usr/local/lib/nemoclaw/bin/nemo-relay-finalize-hook
 COPY agents/hermes/nemo-relay/hermes-cli-shim /usr/local/lib/nemoclaw/bin/hermes
 RUN chmod 755 /usr/local/lib/nemoclaw/bin/hermes
 
+# Helper invoked by start.sh's refresh_hermes_provider_placeholders to rewrite
+# .hermes-data/.env with the latest provider-injected placeholder values.
+COPY agents/hermes/refresh-placeholders.py /usr/local/lib/nemoclaw/refresh-placeholders.py
+RUN chmod 755 /usr/local/lib/nemoclaw/refresh-placeholders.py
+
 COPY agents/hermes/patches/ /usr/local/lib/nemoclaw-patches/
 
-# Pin slack-bolt / python-telegram-bot / pyyaml / httpx into Hermes's venv
-# interpreter so the sitecustomize patches (Slack catch-all, SDK placeholder
-# rewrite) find the modules they wrap. hadolint ignore=DL3013
+# Pin slack-bolt / python-telegram-bot / pyyaml / httpx into the system
+# python interpreter. slack-bolt is needed by the sitecustomize.py
+# catch-all-command patch (via gateway.platforms.slack.SlackAdapter); the
+# others are general Hermes runtime deps. hadolint ignore=DL3013
 RUN pip3 install --no-cache-dir --break-system-packages \
        "pyyaml==6.0.3" \
        "python-telegram-bot>=21.0" \
@@ -227,6 +207,20 @@ RUN pip3 install --no-cache-dir --break-system-packages \
 # start.sh, and the wrapped-CLI `[agents.hermes]` block isn't used in the
 # sidecar/daemon architecture (agents POST to the daemon; it doesn't launch
 # them).
+# ATIF storage ARGs live here together because the RUN below substitutes them
+# at plugins.toml render time. Docker only resolves ${ARG_NAME} in instructions
+# that come AFTER the ARG declaration, so splitting them would leave the RUN
+# with empty values. 03-sandbox.sh sets these via sed-patch on the staged
+# Dockerfile (no --build-arg passthrough).
+#
+# The sandbox bakes NO real infra identifiers: the storage block below uses a
+# VESTIGIAL placeholder bucket and an EMPTY key_prefix. The host-side relay is
+# the sole owner of the real bucket, the key prefix, and the credentials — it
+# rewrites them at egress (see extras/atif-export-relay/). This keeps the image
+# generic/shareable and means the sandbox can't influence where traces land.
+ARG ATIF_EXPORT_MODE=
+ARG ATIF_RELAY_ENDPOINT=https://host.openshell.internal:18443
+
 COPY agents/hermes/nemo-relay/plugins.toml.in /tmp/nemo-relay-plugins.toml.in
 RUN mkdir -p /etc/nemo-relay \
     && PHOENIX_URL="${PHOENIX_COLLECTOR_ENDPOINT:-}" \
@@ -239,18 +233,30 @@ RUN mkdir -p /etc/nemo-relay \
          # .env.example and README for the documented value format.
          PHOENIX_ENABLED=true; PHOENIX_ENDPOINT="${PHOENIX_URL%/}"; \
        fi \
-    && sed -e "s|@@PHOENIX_ENABLED@@|${PHOENIX_ENABLED}|g" \
-           -e "s|@@PHOENIX_ENDPOINT@@|${PHOENIX_ENDPOINT}|g" \
-           -e "s|@@PHOENIX_PROJECT_NAME@@|${PHOENIX_PROJECT_NAME}|g" \
-       /tmp/nemo-relay-plugins.toml.in > /etc/nemo-relay/plugins.toml \
+    && if [ "${ATIF_EXPORT_MODE}" != "relay" ]; then \
+         ATIF_STORAGE_BLOCK=""; \
+       else \
+         # Emit a storage block with a VESTIGIAL placeholder bucket and EMPTY
+         # key_prefix — the host-side relay owns the real bucket/prefix/creds
+         # and rewrites them (NeMo-Relay's S3 plugin reads AWS_* at runtime; see
+         # start.sh). Constant values, so no printf format args. Use printf for
+         # POSIX-portable newlines — RUN runs under /bin/sh (no $'...').
+         ATIF_STORAGE_BLOCK="$(printf '\n[[components.config.atif.storage]]\ntype = \"s3\"\nbucket = \"atif-export\"\nkey_prefix = \"\"\n')"; \
+       fi \
+    && awk \
+         -v atif_block="${ATIF_STORAGE_BLOCK}" \
+         -v phoenix_enabled="${PHOENIX_ENABLED}" \
+         -v phoenix_endpoint="${PHOENIX_ENDPOINT}" \
+         -v phoenix_project="${PHOENIX_PROJECT_NAME}" \
+         '{ gsub(/@@ATIF_STORAGE_BLOCK@@/, atif_block); gsub(/@@PHOENIX_ENABLED@@/, phoenix_enabled); gsub(/@@PHOENIX_ENDPOINT@@/, phoenix_endpoint); gsub(/@@PHOENIX_PROJECT_NAME@@/, phoenix_project); print }' \
+         /tmp/nemo-relay-plugins.toml.in \
+       > /etc/nemo-relay/plugins.toml \
     && rm /tmp/nemo-relay-plugins.toml.in \
     && chmod 444 /etc/nemo-relay/plugins.toml
 
 # Hermes v2026.4.13+ auto-detects HTTPS_PROXY and skips fallback-IP
-# transport when a proxy is present. The sandbox proxy chain
-# (decode-proxy → OpenShell L7 proxy) handles credential placeholder
-# rewriting and hostname-based policy enforcement. The Python preload
-# rewrites Slack SDK-shaped placeholders before HTTPS serialization.
+# transport when a proxy is present. The OpenShell L7 proxy owns credential
+# placeholder rewriting and hostname-based policy enforcement.
 #
 # Only HERMES_HOME and HERMES_DISABLE_LAZY_INSTALLS reliably reach
 # user processes — OpenShell's exec-session allowlist strips most other
@@ -259,8 +265,7 @@ RUN mkdir -p /etc/nemo-relay \
 # _PROXY_ENV_FILE so interactive shells get it.
 ENV HERMES_TELEGRAM_DISABLE_FALLBACK_IPS=1 \
     HERMES_DISABLE_LAZY_INSTALLS=1 \
-    HERMES_HOME=/sandbox/.hermes-data \
-    GH_TOKEN=openshell:resolve:env:GITHUB_TOKEN
+    HERMES_HOME=/sandbox/.hermes-data
 
 # Copy NemoClaw plugin for Hermes (Python-based)
 COPY agents/hermes/plugins/nemoclaw/ /opt/nemoclaw-hermes-plugin/
@@ -275,21 +280,15 @@ COPY agents/hermes/plugins/nemo-relay/ /opt/nemo-relay-hermes-plugin/
 # Install under /usr/local/lib/ so Landlock's read_only /usr rule permits access.
 COPY agents/hermes/bridges/ /usr/local/lib/nemoclaw-bridges/
 
-# Copy config generation script and Slack helper shims.
-# Install under /usr/local/lib so Landlock's read_only /usr rule permits
-# the sandbox process to read both the decode proxy and preload files.
+# Copy config generation script. Installed under /usr/local/lib so Landlock's
+# read_only /usr rule permits the sandbox process to read it.
 COPY agents/hermes/generate-config.ts /opt/nemoclaw-generate-config.ts
-RUN mkdir -p /usr/local/lib/nemoclaw-slack-shims
-COPY agents/hermes/decode-proxy.py /usr/local/lib/nemoclaw-slack-shims/decode-proxy.py
-RUN chmod 755 /usr/local/lib/nemoclaw-slack-shims/decode-proxy.py \
-    && find /usr/local/lib/nemoclaw-patches -type d -exec chmod 755 {} + \
+RUN find /usr/local/lib/nemoclaw-patches -type d -exec chmod 755 {} + \
     && find /usr/local/lib/nemoclaw-patches -type f -exec chmod 444 {} +
 
 # NOTE: This example removes the upstream NemoClaw `COPY nemoclaw-blueprint/`
-# step. Nothing in the Hermes runtime (start.sh, plugin/, bridges/, sidecars/,
-# skills/) reads /sandbox/.nemoclaw/blueprints/0.1.0/ — it was build-time
-# scaffolding only. Dropping it means the example doesn't need NemoClaw's
-# nemoclaw-blueprint/ directory in its build context.
+# step. Nothing in the Hermes runtime reads /sandbox/.nemoclaw/blueprints/0.1.0/ —
+# it was build-time scaffolding only.
 
 # Ensure sandbox user can read all /opt/nemoclaw-* and bridge files.
 # Source files may have restrictive permissions that Docker COPY preserves.
@@ -320,11 +319,12 @@ ARG NEMOCLAW_MODEL=nvidia/nemotron-3-super-120b-a12b
 ARG NEMOCLAW_PROVIDER_KEY=custom
 ARG NEMOCLAW_INFERENCE_BASE_URL=https://inference.local/v1
 ARG CHAT_UI_URL=http://127.0.0.1:8642
+# NEMOCLAW_MESSAGING_CHANNELS_B64 stays baked: it's the channel SET (derived
+# from which provider tokens exist), not per-user identity. Per-user values
+# (OUTLOOK_TARGET_MAILBOX/REPLY_TO/ALLOWED_SENDERS and the Slack allowlist) are
+# injected at sandbox-create time via `-- env` (scripts/03-sandbox.sh) so the
+# image stays generic and shareable.
 ARG NEMOCLAW_MESSAGING_CHANNELS_B64=W10=
-ARG NEMOCLAW_MESSAGING_ALLOWED_IDS_B64=e30=
-ARG OUTLOOK_TARGET_MAILBOX=
-ARG OUTLOOK_REPLY_TO=
-ARG OUTLOOK_ALLOWED_SENDERS=
 ARG GITHUB_READONLY_REPO=NVIDIA/OpenShell
 ARG SOURCE_ETL_GITHUB_REPO=
 ARG SOURCE_ETL_FORUM_TAG=
@@ -332,7 +332,6 @@ ARG SOURCE_ETL_API_URL=
 ARG SOURCE_ETL_API_HOST=host.openshell.internal
 ARG SOURCE_ETL_API_PORT=3100
 ARG NEMOCLAW_BUILD_ID=default
-ARG MS_GRAPH_SERVICES="outlook"
 
 # Promote build-args to env vars for the config generation script.
 ENV NEMOCLAW_MODEL=${NEMOCLAW_MODEL} \
@@ -340,17 +339,14 @@ ENV NEMOCLAW_MODEL=${NEMOCLAW_MODEL} \
     NEMOCLAW_INFERENCE_BASE_URL=${NEMOCLAW_INFERENCE_BASE_URL} \
     CHAT_UI_URL=${CHAT_UI_URL} \
     NEMOCLAW_MESSAGING_CHANNELS_B64=${NEMOCLAW_MESSAGING_CHANNELS_B64} \
-    NEMOCLAW_MESSAGING_ALLOWED_IDS_B64=${NEMOCLAW_MESSAGING_ALLOWED_IDS_B64} \
-    OUTLOOK_TARGET_MAILBOX=${OUTLOOK_TARGET_MAILBOX} \
-    OUTLOOK_REPLY_TO=${OUTLOOK_REPLY_TO} \
-    OUTLOOK_ALLOWED_SENDERS=${OUTLOOK_ALLOWED_SENDERS} \
     GITHUB_READONLY_REPO=${GITHUB_READONLY_REPO} \
-    MS_GRAPH_SERVICES=${MS_GRAPH_SERVICES} \
     SOURCE_ETL_GITHUB_REPO=${SOURCE_ETL_GITHUB_REPO} \
     SOURCE_ETL_FORUM_TAG=${SOURCE_ETL_FORUM_TAG} \
     SOURCE_ETL_API_URL=${SOURCE_ETL_API_URL} \
     SOURCE_ETL_API_HOST=${SOURCE_ETL_API_HOST} \
-    SOURCE_ETL_API_PORT=${SOURCE_ETL_API_PORT}
+    SOURCE_ETL_API_PORT=${SOURCE_ETL_API_PORT} \
+    ATIF_EXPORT_MODE=${ATIF_EXPORT_MODE} \
+    ATIF_RELAY_ENDPOINT=${ATIF_RELAY_ENDPOINT}
 
 WORKDIR /sandbox
 USER sandbox
@@ -396,8 +392,9 @@ RUN sha256sum /sandbox/.hermes/config.yaml /sandbox/.hermes/.env \
     && chmod 444 /sandbox/.hermes/.config-hash \
     && chown root:root /sandbox/.hermes/.config-hash
 
-# start.sh handles privilege separation: runs as root initially to perform
-# symlink validation and hardening, then drops to 'gateway' user via gosu
-# for the agent process. See the root-path branch in start.sh.
+# start.sh assumes it is launched as the workload uid (under OpenShell:
+# sandbox/998). All bridges, the Hermes gateway, and the nemo-relay sidecar
+# run as that uid; the only DAC-enforced boundary at runtime is the
+# root:root 444 immutable config dir baked in above.
 ENTRYPOINT ["/usr/local/bin/nemoclaw-start"]
 CMD ["/bin/bash"]

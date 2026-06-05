@@ -4,29 +4,26 @@
 #
 # Lifecycle utility for the host-side services in extras/docker-compose.yml.
 # These services run on the host (not in the sandbox) and are reached by
-# the agent via the L7 proxy. They're modeled as one stack so the user
-# only has to learn one compose file.
+# the agent via the L7 proxy. Outlook OAuth is handled directly by the
+# OpenShell v2 outlook provider.
 #
-#   phoenix                  — OpenInference trace collector (UI on :6006)
-#   ms-graph-token-manager   — Outlook OAuth token broker (host port 8765)
-#   postgres                 — backing store for source ETLs
-#   github-etl               — pulls GitHub issues/comments into postgres
-#   forums-etl               — pulls NVIDIA forum posts into postgres
-#   postgrest                — REST API in front of postgres (host port 3100)
+#   phoenix      — OpenInference trace collector (UI on :6006)
+#   postgres     — backing store for source ETLs
+#   github-etl   — pulls GitHub issues/comments into postgres
+#   forums-etl   — pulls NVIDIA forum posts into postgres
+#   postgrest    — REST API in front of postgres (host port 3100)
+#
+# When ATIF_EXPORT_MODE=relay, the atif-export-relay service is also brought up
+# via the compose profile matching ATIF_RELAY_BACKEND (s3|minio). When the relay
+# backend is minio, the minio container is brought up too — a one-shot mc client
+# creates the bucket after MinIO is healthy.
 #
 # Verbs:
 #   up                  Start the stack (default if no arg).
 #   down                Stop and remove containers, preserve volumes.
-#   down --volumes      Also remove named volumes (token-cache,
-#                       source-etls-postgres-data, github-etl-state).
-#                       DESTRUCTIVE: requires Outlook re-auth and forces
-#                       ETL re-scrape on next `up`.
-#
-# Try after this script:
-#   $ docker compose -f extras/docker-compose.yml ps
-#   $ curl -s http://localhost:8765/health    # token manager
-#   $ curl -s http://localhost:6006           # phoenix UI
-#   $ curl -s http://localhost:3100/          # postgrest
+#   down --volumes      Also remove named volumes
+#                       (source-etls-postgres-data, github-etl-state).
+#                       DESTRUCTIVE: forces ETL re-scrape on next `up`.
 
 set -euo pipefail
 DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -45,21 +42,59 @@ Usage: $(basename "$0") [up|down [--volumes]]
   down        Stop and remove containers; preserve named volumes.
   down -v
   down --volumes
-              Also remove named volumes (token-cache,
-              source-etls-postgres-data, github-etl-state).
-              DESTRUCTIVE: requires Outlook re-auth via
-              authenticate.sh and forces ETL re-scrape on next up.
+              Also remove named volumes (source-etls-postgres-data,
+              github-etl-state). DESTRUCTIVE: forces ETL re-scrape
+              on next up.
 EOF
 }
 
 cmd_up() {
-  echo "Starting host services: phoenix ms-graph-token-manager postgres github-etl forums-etl postgrest"
-  docker compose -f "$COMPOSE_FILE" up -d --build \
-    phoenix ms-graph-token-manager postgres github-etl forums-etl postgrest
+  local profile_args=() backend=""
+  if atif_remote_enabled; then
+    backend="$(atif_relay_backend)"   # validates s3|minio (loud error if unset)
+    # Resolve + export the downstream bucket BEFORE `docker compose up`: s3 /
+    # s3-compatible fail loud here if ATIF_RELAY_BUCKET is unset, and compose
+    # inherits the resolved value.
+    export ATIF_RELAY_BUCKET="$(atif_relay_bucket "$backend")"
+    profile_args=(--profile "$backend")
+    # Generate/read the per-VM bearer from the gitignored cache (not .env) so
+    # the relay starts WITH it on the first `up` — no crash-then-recreate.
+    export ATIF_RELAY_AUTH_TOKEN="${ATIF_RELAY_AUTH_TOKEN:-$(atif_relay_token)}"
+    echo "ATIF export: relay → $backend (atif-export-relay + ${backend} will be brought up)"
+    # Cert is bind-mounted into the relay container at startup; generate
+    # it now so the relay doesn't crashloop on missing files. See
+    # docs/atif-export.md "Sandbox→relay TLS via Python protocol-bridge
+    # sidecar" for the wider architecture.
+    bash "$EXAMPLE_DIR/extras/atif-export-relay/generate-tls-cert.sh"
+  else
+    echo "ATIF export: local (traces written to sandbox /tmp/atif; no host services for ATIF)"
+  fi
+
+  echo "Starting host services${profile_args:+ (profile=$backend)}"
+  docker compose -f "$COMPOSE_FILE" "${profile_args[@]}" up -d --build
+
+  # Wait for MinIO healthy + create the bucket (idempotent).
+  if [[ "$backend" == "minio" ]]; then
+    local bucket="$ATIF_RELAY_BUCKET"   # resolved/exported above
+    local minio_user="${NEMOCLAW_MINIO_ROOT_USER:-minioadmin}"
+    local minio_pw="${NEMOCLAW_MINIO_ROOT_PASSWORD:-minioadmin}"
+    echo "Waiting for MinIO healthy then ensuring bucket $bucket exists"
+    for _ in $(seq 1 30); do
+      if curl -sf http://localhost:9000/minio/health/live >/dev/null 2>&1; then break; fi
+      sleep 1
+    done
+    # MC_HOST_<alias> is mc's URL-embedded-credential form. Using it inline
+    # avoids needing to persist mc's config.json between `docker run --rm`
+    # invocations (each one starts with empty alias state otherwise).
+    docker run --rm --network=host \
+      -e "MC_HOST_local=http://${minio_user}:${minio_pw}@localhost:9000" \
+      minio/mc mb --ignore-existing "local/$bucket" >/dev/null
+    echo "Bucket ready: local/$bucket"
+  fi
 
   echo
   echo "Status:"
-  docker compose -f "$COMPOSE_FILE" ps
+  docker compose -f "$COMPOSE_FILE" "${profile_args[@]}" ps
 }
 
 cmd_down() {
@@ -70,15 +105,17 @@ cmd_down() {
     *) echo "Unknown flag: $1" >&2; usage >&2; exit 2 ;;
   esac
 
+  # --profile '*' wildcards across all profiles so profile-gated containers
+  # (minio, atif-export-relay) get torn down regardless of which backend was
+  # active at up time. Without this, `down` silently leaves them running.
   if [[ "$with_volumes" == "1" ]]; then
     echo "Stopping host services and REMOVING NAMED VOLUMES."
-    echo "  - token-cache (Outlook MSAL sessions — re-run authenticate.sh after next 'up')"
     echo "  - source-etls-postgres-data (mirrored GitHub + forum data — ETLs will re-scrape)"
     echo "  - github-etl-state (ETL cursor)"
-    docker compose -f "$COMPOSE_FILE" down -v
+    docker compose -f "$COMPOSE_FILE" --profile '*' down -v
   else
     echo "Stopping host services (volumes preserved)."
-    docker compose -f "$COMPOSE_FILE" down
+    docker compose -f "$COMPOSE_FILE" --profile '*' down
   fi
 }
 

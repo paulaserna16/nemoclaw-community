@@ -38,13 +38,24 @@ fi
 # SECURITY: Lock down PATH
 export PATH="/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
 
+# ── ATIF storage probe (computed once) ───────────────────────────
+# "Enabled" iff plugins.toml has the [[components.config.atif.storage]]
+# block. Set at image-build time (Dockerfile emits it when ATIF_EXPORT_MODE
+# is relay), so the runtime check here is authoritative
+# regardless of what env vars OpenShell's exec-session allowlist did or
+# didn't propagate. Drives the atif-bridge gate and the AWS_* exports
+# below; all three are in lockstep — either all on or all off.
+ATIF_STORAGE_ENABLED=0
+if grep -q '^\[\[components\.config\.atif\.storage\]\]' /etc/nemo-relay/plugins.toml 2>/dev/null; then
+  ATIF_STORAGE_ENABLED=1
+fi
+
 # ── Early stderr/stdout capture ──────────────────────────────────
 # Capture all entrypoint output to /tmp/nemoclaw-start.log so startup
 # failures before /tmp/gateway.log exists are still diagnosable.
 prepare_restricted_log() {
   local path="$1"
-  local owner="${2:-}"
-  local mode="${3:-600}"
+  local mode="${2:-600}"
   local dir base tmp
 
   dir="$(dirname "$path")"
@@ -54,10 +65,6 @@ prepare_restricted_log() {
     rm -f "$tmp"
     return 1
   }
-  if [ "$(id -u)" -eq 0 ] && [ -n "$owner" ] && ! chown "$owner" "$tmp"; then
-    rm -f "$tmp"
-    return 1
-  fi
   if ! chmod "$mode" "$tmp"; then
     rm -f "$tmp"
     return 1
@@ -69,11 +76,7 @@ prepare_restricted_log() {
 }
 
 _START_LOG="/tmp/nemoclaw-start.log"
-if [ "$(id -u)" -eq 0 ]; then
-  prepare_restricted_log "$_START_LOG" root:root 600
-else
-  prepare_restricted_log "$_START_LOG" "" 600
-fi
+prepare_restricted_log "$_START_LOG" 600
 exec > >(tee -a "$_START_LOG") 2> >(tee -a "$_START_LOG" >&2)
 
 # ── Drop unnecessary Linux capabilities (shared) ────────────────
@@ -127,14 +130,8 @@ HERMES_HASH_FILE="${HERMES_IMMUTABLE}/.config-hash"
 # Copy verified immutable config into the writable HERMES_HOME so the
 # gateway process can read it alongside its own state files.
 deploy_config_to_writable() {
-  # When running as root, use gosu to write as sandbox user (owner of .hermes-data).
-  if [ "$(id -u)" -eq 0 ]; then
-    gosu sandbox cp "${HERMES_IMMUTABLE}/config.yaml" "${HERMES_WRITABLE}/config.yaml"
-    gosu sandbox cp "${HERMES_IMMUTABLE}/.env" "${HERMES_WRITABLE}/.env"
-  else
-    cp "${HERMES_IMMUTABLE}/config.yaml" "${HERMES_WRITABLE}/config.yaml"
-    cp "${HERMES_IMMUTABLE}/.env" "${HERMES_WRITABLE}/.env"
-  fi
+  cp "${HERMES_IMMUTABLE}/config.yaml" "${HERMES_WRITABLE}/config.yaml"
+  cp "${HERMES_IMMUTABLE}/.env" "${HERMES_WRITABLE}/.env"
   chmod 600 "${HERMES_WRITABLE}/config.yaml" "${HERMES_WRITABLE}/.env" 2>/dev/null || true
   echo "[config] Deployed verified config to ${HERMES_WRITABLE}" >&2
 }
@@ -143,7 +140,7 @@ refresh_hermes_provider_placeholders() {
   local env_file="${HERMES_WRITABLE}/.env"
   [ -f "$env_file" ] || return 0
 
-  local keys="TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN GITHUB_TOKEN GH_TOKEN"
+  local keys="TELEGRAM_BOT_TOKEN DISCORD_BOT_TOKEN SLACK_BOT_TOKEN SLACK_APP_TOKEN GITHUB_TOKEN"
   local has_scoped_placeholder=0
   local key value
   for key in $keys; do
@@ -160,64 +157,15 @@ refresh_hermes_provider_placeholders() {
   fi
 
   NEMOCLAW_PROVIDER_PLACEHOLDER_KEYS="$keys" \
-    python3 - "$env_file" <<'PYPLACEHOLDERS'
-import os
-import sys
-
-env_file = sys.argv[1]
-prefix = "openshell:resolve:env:"
-keys = os.environ.get("NEMOCLAW_PROVIDER_PLACEHOLDER_KEYS", "").split()
-replacements = {}
-
-for key in keys:
-    value = os.environ.get(key, "")
-    if value.startswith(prefix):
-        replacements[key] = value
-
-if not replacements:
-    sys.exit(0)
-
-with open(env_file, encoding="utf-8") as f:
-    lines = f.readlines()
-
-changed = False
-updated = []
-seen = set()
-for line in lines:
-    stripped = line.rstrip("\n")
-    replaced = False
-    for key, value in replacements.items():
-        if stripped.startswith(f"{key}="):
-            new_line = f"{key}={value}\n"
-            updated.append(new_line)
-            seen.add(key)
-            changed = changed or new_line != line
-            replaced = True
-            break
-    if not replaced:
-        updated.append(line)
-
-for key, value in replacements.items():
-    if key not in seen:
-        updated.append(f"{key}={value}\n")
-        changed = True
-
-if not changed:
-    sys.exit(0)
-
-with open(env_file, "w", encoding="utf-8") as f:
-    f.writelines(updated)
-PYPLACEHOLDERS
+    python3 /usr/local/lib/nemoclaw/refresh-placeholders.py "$env_file"
 
   echo "[config] Refreshed Hermes provider placeholders from OpenShell runtime env" >&2
 }
 
 _has_outlook_channel() {
-  # Primary: OUTLOOK_CLIENT_ID is injected by OpenShell providers at runtime,
-  # making it a reliable signal that the Outlook channel was configured.
-  # Secondary: NEMOCLAW_MESSAGING_CHANNELS_B64 (baked at build time, may not
-  # be present if OpenShell doesn't forward Docker ENV vars).
-  [ -n "${OUTLOOK_CLIENT_ID:-}" ] \
+  # MS_GRAPH_ACCESS_TOKEN is injected by the OpenShell v2 outlook provider when
+  # attached; its presence signals the Outlook channel is wired up.
+  [ -n "${MS_GRAPH_ACCESS_TOKEN:-}" ] \
     || echo "${NEMOCLAW_MESSAGING_CHANNELS_B64:-W10=}" \
     | python3 -c "import sys,base64,json; d=json.loads(base64.b64decode(sys.stdin.read().strip())); sys.exit(0 if 'outlook' in d else 1)" 2>/dev/null
 }
@@ -228,7 +176,7 @@ configure_messaging_channels() {
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] || [ -n "${DISCORD_BOT_TOKEN:-}" ] \
     || [ -n "${SLACK_BOT_TOKEN:-}" ] || _has_outlook_channel || return 0
 
-  echo "[channels] Messaging channels active (baked at build time):" >&2
+  echo "[channels] Messaging channels active (channel set baked; per-user auth via runtime env):" >&2
   [ -n "${TELEGRAM_BOT_TOKEN:-}" ] && echo "[channels]   telegram" >&2
   [ -n "${DISCORD_BOT_TOKEN:-}" ] && echo "[channels]   discord" >&2
   [ -n "${SLACK_BOT_TOKEN:-}" ] && echo "[channels]   slack" >&2
@@ -273,33 +221,8 @@ start_socat_forwarder() {
   echo "[gateway] socat forwarder 0.0.0.0:${PUBLIC_PORT} → 127.0.0.1:${INTERNAL_PORT} (pid $SOCAT_PID)" >&2
 }
 
-# ── Placeholder rewrite proxy ───────────────────────────────────
-# Python HTTP clients (httpx) URL-encode colons in paths, breaking
-# OpenShell's openshell:resolve:env: placeholder pattern. This proxy
-# sits between the Hermes process and the OpenShell proxy, URL-decoding
-# request targets so the L7 proxy recognizes REST placeholders. Slack
-# SDK-shaped placeholders are canonicalized in the Hermes Python preload
-# before HTTPS serialization.
-HERMES_VENV_PYTHON="/opt/hermes/.venv/bin/python"
-SLACK_SHIMS_DIR="/usr/local/lib/nemoclaw-slack-shims"
+# PATCHES_DIR is referenced by PYTHONPATH below + the _PROXY_ENV_FILE export.
 PATCHES_DIR="/usr/local/lib/nemoclaw-patches"
-DECODE_PROXY_PID=""
-DECODE_PROXY_PORT=3129
-start_decode_proxy() {
-  nohup "$HERMES_VENV_PYTHON" "${SLACK_SHIMS_DIR}/decode-proxy.py" >/dev/null 2>&1 &
-  DECODE_PROXY_PID=$!
-  # Wait for it to start listening
-  local attempts=0
-  while [ "$attempts" -lt 10 ]; do
-    if ss -tln 2>/dev/null | grep -q "127.0.0.1:${DECODE_PROXY_PORT}"; then
-      echo "[gateway] decode-proxy listening on 127.0.0.1:${DECODE_PROXY_PORT} (pid $DECODE_PROXY_PID)" >&2
-      return
-    fi
-    sleep 0.5
-    attempts=$((attempts + 1))
-  done
-  echo "[gateway] decode-proxy failed to start — placeholder rewriting may not work" >&2
-}
 
 # ── NeMo-Relay sidecar gateway ──────────────────────────────────
 NEMO_RELAY_PID=""
@@ -308,15 +231,9 @@ start_nemo_relay_sidecar() {
     echo "[nemo-relay] binary not found at /usr/local/bin/nemo-relay, skipping" >&2
     return 0
   fi
-  if [ "$(id -u)" -eq 0 ]; then
-    nohup gosu gateway /usr/local/bin/nemo-relay \
-      --bind "127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}" \
-      >>/tmp/nemo-relay.log 2>&1 &
-  else
-    nohup /usr/local/bin/nemo-relay \
-      --bind "127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}" \
-      >>/tmp/nemo-relay.log 2>&1 &
-  fi
+  nohup /usr/local/bin/nemo-relay \
+    --bind "127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}" \
+    >>/tmp/nemo-relay.log 2>&1 &
   NEMO_RELAY_PID=$!
   # Wait for /healthz so PID-1 hermes doesn't race the sidecar (silent drops).
   local attempts=0
@@ -337,45 +254,68 @@ start_nemo_relay_sidecar() {
   exit 1
 }
 
-# Outlook bridge / MS Graph sidecar PIDs (populated at launch).
-OUTLOOK_BRIDGE_PID=""
-MS_GRAPH_SIDECAR_PID=""
-
-start_ms_graph_sidecar() {
-  _has_outlook_channel || return 0
-  local sidecar_bin="/usr/local/bin/ms-graph-sidecar"
-  [ -f "$sidecar_bin" ] || {
-    echo "[ms-graph-sidecar] binary not found at ${sidecar_bin}, skipping" >&2
+# ── ATIF protocol-bridge sidecar ──────────────────────────────────
+# Tiny HTTP→HTTPS shim that lets nemo-relay-cli (rustls via object_store /
+# reqwest) reach the host atif-export-relay over TLS. rustls 0.23+ rejects
+# OpenShell's L7-proxy MITM cert because the cert lacks the serverAuth EKU
+# extension (OpenShell `crates/openshell-sandbox/src/l7/tls.rs:115-135`).
+# The bridge re-emits each request as HTTPS via Python's ssl module
+# (OpenSSL backend), which accepts certs without that EKU — same property
+# that lets curl / Python requests / git / every other Hermes outbound work
+# through the same L7 proxy today. nemo-relay points at the bridge over
+# loopback HTTP; the bridge talks HTTPS upstream; the L7 proxy MITMs and
+# substitutes the AWS_SESSION_TOKEN placeholder during that hop. Bearer
+# stays in L7 proxy process memory only.
+ATIF_BRIDGE_PID=""
+start_atif_bridge() {
+  # Only start when ATIF S3 export is configured — see ATIF_STORAGE_ENABLED
+  # probe at top of script.
+  [ "$ATIF_STORAGE_ENABLED" = "1" ] || return 0
+  # Readability suffices — we invoke as `python3 <path>`, so the file
+  # doesn't need the executable bit (and Dockerfile's `chmod -R a+rX`
+  # deliberately doesn't set +x on regular files).
+  if ! [ -r /usr/local/lib/nemoclaw-bridges/atif/atif-bridge.py ]; then
+    echo "[atif-bridge] /usr/local/lib/nemoclaw-bridges/atif/atif-bridge.py not readable, skipping" >&2
     return 0
-  }
-  # TOKEN_MANAGER_HOST is baked into the image as a Docker ARG/ENV (Phoenix pattern).
-  # The sidecar uses trust_env=True so it inherits HTTP_PROXY=http://10.200.0.1:3128
-  # from this script's exported environment. All requests (Graph API and token manager)
-  # flow through the OpenShell L7 proxy directly, which attributes them to the sidecar
-  # binary path for policy enforcement. No decode-proxy hop needed here.
-  local sidecar_env
-  sidecar_env="SIDECAR_LISTEN_HOST=${SIDECAR_LISTEN_ADDR} SIDECAR_LISTEN_PORT=${SIDECAR_PORT}"
-  if [ "$(id -u)" -eq 0 ]; then
-    # shellcheck disable=SC2086
-    nohup env ${sidecar_env} gosu ms-graph-proxy "$sidecar_bin" >>/tmp/ms-graph-sidecar.log 2>&1 &
-  else
-    # shellcheck disable=SC2086
-    nohup env ${sidecar_env} "$sidecar_bin" >>/tmp/ms-graph-sidecar.log 2>&1 &
   fi
-  MS_GRAPH_SIDECAR_PID=$!
-  echo "[ms-graph-sidecar] started (pid ${MS_GRAPH_SIDECAR_PID})" >&2
-  # Wait for sidecar to be listening before bridge starts
+  # Scrub credential-shaped env vars before handing off to the bridge.
+  # Defense in depth: bridge.py also refuses to start if any of these are
+  # set. Belt-and-suspenders so a future start.sh regression can't silently
+  # leak a bearer into the bridge's process memory.
+  local scrub=(
+    -u ATIF_RELAY_AUTH_TOKEN
+    -u AWS_SESSION_TOKEN
+    -u AWS_ACCESS_KEY_ID
+    -u AWS_SECRET_ACCESS_KEY
+    -u GITHUB_TOKEN
+    -u MS_GRAPH_ACCESS_TOKEN
+    -u SLACK_BOT_TOKEN
+  )
+  nohup env "${scrub[@]}" \
+    ATIF_BRIDGE_UPSTREAM_URL="${ATIF_RELAY_ENDPOINT:-https://host.openshell.internal:18443}" \
+    python3 /usr/local/lib/nemoclaw-bridges/atif/atif-bridge.py \
+    >>/tmp/atif-bridge.log 2>&1 &
+  ATIF_BRIDGE_PID=$!
   local attempts=0
-  while [ "$attempts" -lt 15 ]; do
-    if ss -tln 2>/dev/null | grep -q "${SIDECAR_LISTEN_ADDR}:${SIDECAR_PORT}"; then
-      echo "[ms-graph-sidecar] listening on ${SIDECAR_LISTEN_ADDR}:${SIDECAR_PORT}" >&2
+  while [ "$attempts" -lt 30 ]; do
+    if curl -sf "http://127.0.0.1:18444/healthz" >/dev/null 2>&1; then
+      echo "[atif-bridge] healthy on 127.0.0.1:18444 (pid $ATIF_BRIDGE_PID)" >&2
       return 0
     fi
-    sleep 1
+    sleep 0.5
     attempts=$((attempts + 1))
   done
-  echo "[ms-graph-sidecar] WARNING: sidecar may not be ready yet (${SIDECAR_LISTEN_ADDR}:${SIDECAR_PORT} not detected)" >&2
+  # Fail-hard: if the bridge isn't up, every trace upload would return
+  # ECONNREFUSED. Quieter than a silent telemetry loss.
+  echo "[atif-bridge] FATAL: bridge did not become healthy within 15s (pid $ATIF_BRIDGE_PID)" >&2
+  echo "[atif-bridge] --- last 30 lines of /tmp/atif-bridge.log ---" >&2
+  tail -n 30 /tmp/atif-bridge.log >&2 2>/dev/null || echo "[atif-bridge] (log unreadable)" >&2
+  echo "[atif-bridge] --- end log ---" >&2
+  exit 1
 }
+
+# Outlook bridge PID (populated at launch).
+OUTLOOK_BRIDGE_PID=""
 
 start_outlook_bridge() {
   if ! _has_outlook_channel; then
@@ -385,30 +325,75 @@ start_outlook_bridge() {
     echo "[outlook-bridge] bridge script not found, skipping" >&2
     return 0
   }
+  # The bridge dials graph.microsoft.com directly with
+  # Authorization: Bearer openshell:resolve:env:MS_GRAPH_ACCESS_TOKEN — the
+  # OpenShell L7 proxy substitutes a gateway-refreshed access token on egress.
   local bridge_env
-  # MS_GRAPH_SIDECAR_URL routes Graph API calls through the credential sidecar on
-  # loopback (plain HTTP). The sidecar injects the live token and forwards to
-  # graph.microsoft.com over HTTPS via the OpenShell proxy.
-  # NO_PROXY ensures the local Hermes gateway is always reached directly.
   bridge_env="HERMES_HOME=${HERMES_WRITABLE} \
-    MS_GRAPH_SIDECAR_URL=http://127.0.0.1:${SIDECAR_PORT} \
     HTTPS_PROXY=${_PROXY_URL} \
     HTTP_PROXY=${_PROXY_URL} \
     https_proxy=${_PROXY_URL} \
     http_proxy=${_PROXY_URL} \
     NO_PROXY=localhost,127.0.0.1,::1 \
     no_proxy=localhost,127.0.0.1,::1"
-  if [ "$(id -u)" -eq 0 ]; then
-    # shellcheck disable=SC2086
-    nohup env ${bridge_env} gosu sandbox python3 /usr/local/lib/nemoclaw-bridges/outlook/outlook-bridge.py \
-      >>/tmp/outlook-bridge.log 2>&1 &
-  else
-    # shellcheck disable=SC2086
-    nohup env ${bridge_env} python3 /usr/local/lib/nemoclaw-bridges/outlook/outlook-bridge.py \
-      >>/tmp/outlook-bridge.log 2>&1 &
-  fi
+  # shellcheck disable=SC2086
+  nohup env ${bridge_env} python3 /usr/local/lib/nemoclaw-bridges/outlook/outlook-bridge.py \
+    >>/tmp/outlook-bridge.log 2>&1 &
   OUTLOOK_BRIDGE_PID=$!
   echo "[outlook-bridge] started (pid ${OUTLOOK_BRIDGE_PID})" >&2
+}
+
+# ── Launch helpers ──────────────────────────────────────────────
+
+# Prepare /tmp/gateway.log + /tmp/atif, verify NeMo-Relay binary+config, and
+# start the sidecar.
+prepare_runtime() {
+  prepare_restricted_log /tmp/gateway.log 600
+  # shellcheck disable=SC2119
+  validate_tmp_permissions
+  mkdir -p /tmp/atif
+  if [ -x /usr/local/bin/nemo-relay ] && [ -r /etc/nemo-relay/plugins.toml ]; then
+    echo "[nemo-relay] binary + config present (plugins.toml=/etc/nemo-relay/plugins.toml)" | tee -a /tmp/gateway.log >&2
+  else
+    echo "[nemo-relay] WARNING: binary or config missing — telemetry disabled" | tee -a /tmp/gateway.log >&2
+  fi
+  # Bridge must be up before nemo-relay so the first PutObject doesn't race
+  # against a closed bridge port.
+  start_atif_bridge
+  start_nemo_relay_sidecar
+}
+
+# Launch the Hermes gateway with the standard env block.
+launch_hermes_gateway() {
+  HERMES_HOME="${HERMES_WRITABLE}" \
+    HTTPS_PROXY="${_PROXY_URL}" HTTP_PROXY="${_PROXY_URL}" \
+    https_proxy="${_PROXY_URL}" http_proxy="${_PROXY_URL}" \
+    PYTHONPATH="${PATCHES_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
+    API_SERVER_KEY="nemoclaw-internal" \
+    NEMO_RELAY_GATEWAY_URL="http://127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}" \
+    nohup hermes gateway run >>/tmp/gateway.log 2>&1 &
+  GATEWAY_PID=$!
+  echo "[gateway] hermes gateway launched (pid $GATEWAY_PID)" >&2
+}
+
+# Wire up supervisor PIDs, signal trap, and side-services after the gateway
+# is launched. Reads GATEWAY_PID; populates SANDBOX_CHILD_PIDS + SANDBOX_WAIT_PID.
+wire_post_launch_supervision() {
+  start_gateway_log_stream
+
+  SANDBOX_CHILD_PIDS=("$GATEWAY_PID")
+  [ -n "${NEMO_RELAY_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$NEMO_RELAY_PID")
+  [ -n "${ATIF_BRIDGE_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$ATIF_BRIDGE_PID")
+  [ -n "${GATEWAY_LOG_TAIL_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$GATEWAY_LOG_TAIL_PID")
+  # shellcheck disable=SC2034  # read by cleanup_on_signal from sandbox-init.sh
+  SANDBOX_WAIT_PID="$GATEWAY_PID"
+  trap cleanup_on_signal SIGTERM SIGINT
+
+  start_socat_forwarder
+  [ -n "${SOCAT_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$SOCAT_PID")
+  start_outlook_bridge
+  [ -n "${OUTLOOK_BRIDGE_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$OUTLOOK_BRIDGE_PID")
+  print_dashboard_urls
 }
 
 # cleanup_on_signal is provided by sandbox-init.sh. It reads
@@ -421,9 +406,6 @@ PROXY_HOST="${NEMOCLAW_PROXY_HOST:-10.200.0.1}"
 PROXY_PORT="${NEMOCLAW_PROXY_PORT:-3128}"
 _PROXY_URL="http://${PROXY_HOST}:${PROXY_PORT}"
 _NO_PROXY_VAL="localhost,127.0.0.1,::1,${PROXY_HOST}"
-# Sidecar bind address and port — consumers always connect via 127.0.0.1 (loopback)
-SIDECAR_PORT="${SIDECAR_LISTEN_PORT:-8766}"
-SIDECAR_LISTEN_ADDR="${SIDECAR_LISTEN_HOST:-127.0.0.1}"
 export HTTP_PROXY="$_PROXY_URL"
 export HTTPS_PROXY="$_PROXY_URL"
 export NO_PROXY="$_NO_PROXY_VAL"
@@ -444,12 +426,42 @@ if [ -n "${SSL_CERT_FILE:-}" ] && [ -f "${SSL_CERT_FILE}" ]; then
   export REQUESTS_CA_BUNDLE="${REQUESTS_CA_BUNDLE:-$SSL_CERT_FILE}"
   export GIT_SSL_CAINFO="${GIT_SSL_CAINFO:-$SSL_CERT_FILE}"
 fi
-# Preserve provider-injected placeholders from OpenShell 0.37+, which are
-# revision-scoped (openshell:resolve:env:v..._KEY). Only fall back to the legacy
-# placeholder format when nothing was injected so local/dev flows still boot.
-export OUTLOOK_CLIENT_ID="${OUTLOOK_CLIENT_ID:-openshell:resolve:env:OUTLOOK_CLIENT_ID}"
-export OUTLOOK_SESSION_UUID="${OUTLOOK_SESSION_UUID:-openshell:resolve:env:OUTLOOK_SESSION_UUID}"
-export MS_GRAPH_SIDECAR_URL="http://127.0.0.1:${SIDECAR_PORT}"
+# Preserve provider-injected MS_GRAPH_ACCESS_TOKEN placeholder for outbound Graph
+# calls. Fall back to the literal placeholder string so local/dev flows still boot
+# (the L7 proxy substitutes it when the v2 outlook provider is attached).
+export MS_GRAPH_ACCESS_TOKEN="${MS_GRAPH_ACCESS_TOKEN:-openshell:resolve:env:MS_GRAPH_ACCESS_TOKEN}"
+
+# ATIF S3 export — Nemo Relay's `object_store` reads AWS_* env vars at
+# startup. The per-sandbox bearer rides in AWS_SESSION_TOKEN: the SDK
+# emits that env var verbatim as a standalone `x-amz-security-token`
+# HTTP header, which matches OpenShell's L7-proxy whole-header-value
+# substitution path. AWS_ACCESS_KEY_ID and AWS_SECRET_ACCESS_KEY are
+# intentionally literal junk — the SDK builds a SigV4 Authorization
+# envelope with them, but it's purely vestigial (atif-export-relay
+# never verifies SigV4; it reads the bearer from x-amz-security-token).
+#
+# AWS_ENDPOINT_URL points at the in-container atif-bridge sidecar on
+# loopback (start_atif_bridge above). The bridge re-emits each request
+# as HTTPS to host.openshell.internal:18443 using Python's ssl module
+# (OpenSSL backend), which the L7 proxy MITMs and substitutes during
+# transit. The real bearer never enters nemo-relay or bridge memory;
+# only the L7 proxy resolves the placeholder. See docs/atif-export.md
+# "Sandbox→relay TLS via Python protocol-bridge sidecar" for the wire
+# diagram and the OpenShell EKU bug that makes the bridge necessary.
+# Production downstream (relay → real S3 / MinIO) is end-to-end HTTPS
+# via boto3. Gated on ATIF_STORAGE_ENABLED so local-mode sandboxes don't
+# carry six dead AWS_* vars that imply S3 export is happening when it
+# isn't.
+if [ "$ATIF_STORAGE_ENABLED" = "1" ]; then
+  export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-nemo-relay-sandbox}"
+  export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-relay-ignores-this-value}"
+  export AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-openshell:resolve:env:ATIF_RELAY_AUTH_TOKEN}"
+  export AWS_ENDPOINT_URL="${AWS_ENDPOINT_URL:-http://127.0.0.1:18444}"
+  export AWS_ALLOW_HTTP="${AWS_ALLOW_HTTP:-true}"
+  # Vestigial signing region — the SigV4 envelope is junk the relay ignores and
+  # re-signs with its own (relay-owned) region. Fixed placeholder, not configurable.
+  export AWS_REGION="${AWS_REGION:-us-east-1}"
+fi
 
 # SECURITY FIX: Write proxy + tool env to a standalone file via
 # emit_sandbox_sourced_file() (root:root 444) instead of appending
@@ -470,9 +482,7 @@ export PYTHONPATH="${PATCHES_DIR}\${PYTHONPATH:+:\${PYTHONPATH}}"
 export HERMES_HOME="${HERMES_WRITABLE}"
 export SLACK_BOT_TOKEN="${SLACK_BOT_TOKEN:-openshell:resolve:env:SLACK_BOT_TOKEN}"
 export GITHUB_READONLY_REPO="${GITHUB_READONLY_REPO:-NVIDIA/OpenShell}"
-export OUTLOOK_CLIENT_ID="${OUTLOOK_CLIENT_ID:-openshell:resolve:env:OUTLOOK_CLIENT_ID}"
-export OUTLOOK_SESSION_UUID="${OUTLOOK_SESSION_UUID:-openshell:resolve:env:OUTLOOK_SESSION_UUID}"
-export MS_GRAPH_SIDECAR_URL="http://127.0.0.1:${SIDECAR_PORT}"
+export MS_GRAPH_ACCESS_TOKEN="${MS_GRAPH_ACCESS_TOKEN:-openshell:resolve:env:MS_GRAPH_ACCESS_TOKEN}"
 export NEMO_RELAY_GATEWAY_URL="http://127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}"
 export PATH="/usr/local/lib/nemoclaw/bin:\$PATH"
 export HERMES_TUI_THEME=dark
@@ -484,164 +494,63 @@ PROXYEOF
       printf 'export %s=%q\n' "$_ca_env_name" "$_ca_env_value"
     fi
   done
-  for _provider_env_name in GITHUB_TOKEN GH_TOKEN; do
+  for _provider_env_name in GITHUB_TOKEN; do
     _provider_env_value="${!_provider_env_name:-}"
     if [ -n "$_provider_env_value" ]; then
       printf 'export %s=%q\n' "$_provider_env_name" "$_provider_env_value"
     fi
   done
+  # Per-user config injected via `-- env` at sandbox-create (kept out of the image
+  # so it stays generic). PID-1 (gateway + bridges) inherit these directly; re-emit
+  # them here so interactive `hermes` shells (exec/SSH) see the same Outlook mailbox
+  # and Slack authorization — otherwise a manually-run gateway has no allowlist and
+  # denies every Slack user. Emit only what's set; SLACK_ALLOWED_USERS and
+  # SLACK_ALLOW_ALL_USERS are mutually exclusive (see scripts/03-sandbox.sh).
+  for _runtime_env_name in \
+    OUTLOOK_TARGET_MAILBOX OUTLOOK_REPLY_TO OUTLOOK_ALLOWED_SENDERS \
+    SLACK_ALLOWED_USERS SLACK_ALLOW_ALL_USERS; do
+    _runtime_env_value="${!_runtime_env_name:-}"
+    if [ -n "$_runtime_env_value" ]; then
+      printf 'export %s=%q\n' "$_runtime_env_name" "$_runtime_env_value"
+    fi
+  done
+  # AWS_* for ATIF S3 export, re-emitted to the proxy env file so sandbox-user
+  # shells inherit them (mechanism explained on the first AWS_* export block
+  # above). Gated on ATIF_STORAGE_ENABLED so local-mode shells see no dead exports.
+  if [ "$ATIF_STORAGE_ENABLED" = "1" ]; then
+    cat <<'STORAGEEOF'
+export AWS_ACCESS_KEY_ID="${AWS_ACCESS_KEY_ID:-nemo-relay-sandbox}"
+export AWS_SECRET_ACCESS_KEY="${AWS_SECRET_ACCESS_KEY:-relay-ignores-this-value}"
+export AWS_SESSION_TOKEN="${AWS_SESSION_TOKEN:-openshell:resolve:env:ATIF_RELAY_AUTH_TOKEN}"
+export AWS_ENDPOINT_URL="${AWS_ENDPOINT_URL:-http://127.0.0.1:18444}"
+export AWS_ALLOW_HTTP="${AWS_ALLOW_HTTP:-true}"
+export AWS_REGION="${AWS_REGION:-us-east-1}"
+STORAGEEOF
+  fi
 } | emit_sandbox_sourced_file "$_PROXY_ENV_FILE"
 
 # ── Main ─────────────────────────────────────────────────────────
 
-echo 'Setting up NemoClaw (Hermes)...' >&2
+echo "Setting up NemoClaw (Hermes) as $(id -un) (uid=$(id -u))..." >&2
 
-# ── Non-root fallback ──────────────────────────────────────────
-if [ "$(id -u)" -ne 0 ]; then
-  echo "[gateway] Running as non-root (uid=$(id -u)) — privilege separation disabled" >&2
-  export HOME=/sandbox
-  export HERMES_HOME="${HERMES_WRITABLE}"
+export HOME=/sandbox
+export HERMES_HOME="${HERMES_WRITABLE}"
 
-  if ! verify_config_integrity "${HERMES_IMMUTABLE}" "${HERMES_HASH_FILE}"; then
-    echo "[SECURITY] Config integrity check failed — refusing to start (non-root mode)" >&2
-    exit 1
-  fi
-  deploy_config_to_writable
-  refresh_hermes_provider_placeholders
-  configure_messaging_channels
-
-  if [ ${#NEMOCLAW_CMD[@]} -gt 0 ]; then
-    exec "${NEMOCLAW_CMD[@]}"
-  fi
-
-  prepare_restricted_log /tmp/gateway.log "" 600
-
-  # Defence-in-depth: verify /tmp file permissions before launching services.
-  # shellcheck disable=SC2119
-  validate_tmp_permissions
-
-  # Prepare ATIF telemetry directory (ephemeral, writable by the current user).
-  mkdir -p /tmp/atif
-  # NeMo-Relay observability is configured via /etc/nemo-relay/plugins.toml
-  # (baked at image build time). Verify the binary and config are present.
-  if [ -x /usr/local/bin/nemo-relay ] && [ -r /etc/nemo-relay/plugins.toml ]; then
-    echo "[nemo-relay] binary + config present (plugins.toml=/etc/nemo-relay/plugins.toml)" | tee -a /tmp/gateway.log >&2
-  else
-    echo "[nemo-relay] WARNING: binary or config missing — telemetry disabled" | tee -a /tmp/gateway.log >&2
-  fi
-
-  # Sidecar must be healthy before PID-1 hermes starts (else first-turn drops).
-  start_nemo_relay_sidecar
-
-  HERMES_HOME="${HERMES_WRITABLE}" \
-    HTTPS_PROXY="${_PROXY_URL}" \
-    HTTP_PROXY="${_PROXY_URL}" \
-    https_proxy="${_PROXY_URL}" \
-    http_proxy="${_PROXY_URL}" \
-    PYTHONPATH="${PATCHES_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
-    API_SERVER_KEY="nemoclaw-internal" \
-    NEMO_RELAY_GATEWAY_URL="http://127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}" \
-    nohup hermes gateway run >>/tmp/gateway.log 2>&1 &
-  GATEWAY_PID=$!
-  echo "[gateway] hermes gateway launched (pid $GATEWAY_PID)" >&2
-  start_gateway_log_stream
-
-  # NOTE: PIDs are collected after launch; a signal arriving between trap
-  # registration and the final append is a small race window (same as before
-  # the shared-library refactor). Acceptable for entrypoint-level cleanup.
-  SANDBOX_CHILD_PIDS=("$GATEWAY_PID")
-  [ -n "${NEMO_RELAY_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$NEMO_RELAY_PID")
-  [ -n "${GATEWAY_LOG_TAIL_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$GATEWAY_LOG_TAIL_PID")
-  # shellcheck disable=SC2034  # read by cleanup_on_signal from sandbox-init.sh
-  SANDBOX_WAIT_PID="$GATEWAY_PID"
-  trap cleanup_on_signal SIGTERM SIGINT
-
-  start_socat_forwarder
-  [ -n "${SOCAT_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$SOCAT_PID")
-  start_ms_graph_sidecar
-  [ -n "${MS_GRAPH_SIDECAR_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$MS_GRAPH_SIDECAR_PID")
-  start_outlook_bridge
-  [ -n "${OUTLOOK_BRIDGE_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$OUTLOOK_BRIDGE_PID")
-  print_dashboard_urls
-
-  wait "$GATEWAY_PID"
-  exit $?
+if ! verify_config_integrity "${HERMES_IMMUTABLE}" "${HERMES_HASH_FILE}"; then
+  echo "[SECURITY] Config integrity check failed — refusing to start" >&2
+  exit 1
 fi
-
-# ── Root path (full privilege separation via gosu) ─────────────
-
-verify_config_integrity "${HERMES_IMMUTABLE}" "${HERMES_HASH_FILE}"
 deploy_config_to_writable
 refresh_hermes_provider_placeholders
 configure_messaging_channels
 
 if [ ${#NEMOCLAW_CMD[@]} -gt 0 ]; then
-  exec gosu sandbox "${NEMOCLAW_CMD[@]}"
+  exec "${NEMOCLAW_CMD[@]}"
 fi
 
-# SECURITY: Protect gateway log from sandbox user tampering.
-prepare_restricted_log /tmp/gateway.log gateway:gateway 600
-
-# Prepare ATIF telemetry directory. Root pre-creates and chowns so the
-# gateway user (launched via gosu below) can write to it.
-mkdir -p /tmp/atif
-chown gateway:gateway /tmp/atif
-# NeMo-Relay observability is configured via /etc/nemo-relay/plugins.toml
-# (baked at image build time). Verify the binary and config are present.
-if [ -x /usr/local/bin/nemo-relay ] && [ -r /etc/nemo-relay/plugins.toml ]; then
-  echo "[nemo-relay] binary + config present (plugins.toml=/etc/nemo-relay/plugins.toml)" | tee -a /tmp/gateway.log >&2
-else
-  echo "[nemo-relay] WARNING: binary or config missing — telemetry disabled" | tee -a /tmp/gateway.log >&2
-fi
-
-# Defence-in-depth: verify /tmp file permissions before launching services.
-# shellcheck disable=SC2119
-validate_tmp_permissions
-
-# Verify ALL symlinks in .hermes point to expected .hermes-data targets.
-validate_config_symlinks "${HERMES_IMMUTABLE}" "${HERMES_WRITABLE}"
-
-# Lock .hermes directory after validation.
-harden_config_symlinks "${HERMES_IMMUTABLE}" "hermes"
-
-# Sidecar must be healthy before PID-1 hermes starts (else first-turn drops).
-start_nemo_relay_sidecar
-
-# NEMO_RELAY_GATEWAY_URL must be in the explicit launch env — PID-1 hermes
-# does not read _PROXY_ENV_FILE, and Slack/Outlook bridge-driven turns funnel
-# through this process to emit telemetry.
-HERMES_HOME="${HERMES_WRITABLE}" \
-  HTTPS_PROXY="${_PROXY_URL}" \
-  HTTP_PROXY="${_PROXY_URL}" \
-  https_proxy="${_PROXY_URL}" \
-  http_proxy="${_PROXY_URL}" \
-  PYTHONPATH="${PATCHES_DIR}${PYTHONPATH:+:${PYTHONPATH}}" \
-  API_SERVER_KEY="nemoclaw-internal" \
-  NEMO_RELAY_GATEWAY_URL="http://127.0.0.1:${NEMO_RELAY_GATEWAY_PORT}" \
-  nohup gosu gateway hermes gateway run \
-    >>/tmp/gateway.log 2>&1 &
-GATEWAY_PID=$!
-echo "[gateway] hermes gateway launched as 'gateway' user (pid $GATEWAY_PID)" >&2
-start_gateway_log_stream
-
-# NOTE: PIDs are collected after launch; a signal arriving between trap
-# registration and the final append is a small race window (same as before
-# the shared-library refactor). Acceptable for entrypoint-level cleanup.
-SANDBOX_CHILD_PIDS=("$GATEWAY_PID")
-[ -n "${NEMO_RELAY_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$NEMO_RELAY_PID")
-[ -n "${DECODE_PROXY_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$DECODE_PROXY_PID")
-[ -n "${GATEWAY_LOG_TAIL_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$GATEWAY_LOG_TAIL_PID")
-# shellcheck disable=SC2034  # read by cleanup_on_signal from sandbox-init.sh
-SANDBOX_WAIT_PID="$GATEWAY_PID"
-trap cleanup_on_signal SIGTERM SIGINT
-
-start_socat_forwarder
-[ -n "${SOCAT_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$SOCAT_PID")
-start_ms_graph_sidecar
-[ -n "${MS_GRAPH_SIDECAR_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$MS_GRAPH_SIDECAR_PID")
-start_outlook_bridge
-[ -n "${OUTLOOK_BRIDGE_PID:-}" ] && SANDBOX_CHILD_PIDS+=("$OUTLOOK_BRIDGE_PID")
-print_dashboard_urls
+prepare_runtime
+launch_hermes_gateway
+wire_post_launch_supervision
 
 # Keep container running by waiting on the gateway process.
 wait "$GATEWAY_PID"

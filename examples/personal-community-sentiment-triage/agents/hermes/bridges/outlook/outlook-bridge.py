@@ -1,20 +1,11 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 #
-# Outlook bridge for NemoClaw / Hermes Agent — delegated auth edition.
-#
-# Polls Microsoft Graph API for new emails using delta queries, relays
-# each message body to the Hermes HTTP API, and sends the reply back to the
-# sender via Graph API. Also runs scheduled jobs from cron/outlook-jobs.json.
-#
-# Credential injection: all Graph API requests carry
-#   Authorization: Bearer MS_GRAPH_TOKEN_PLACEHOLDER
-# The credential sidecar (127.0.0.1:8766) intercepts these, swaps the
-# placeholder with the live delegated access token, and forwards to Graph.
-# The bridge never holds or requests a real token.
-#
-# To use without the sidecar (testing only), leave MS_GRAPH_SIDECAR_URL unset;
-# requests go directly to graph.microsoft.com — but will fail without auth.
+# Outlook bridge — polls Microsoft Graph for new mail, relays to the Hermes
+# HTTP API, sends replies. Authorization is `Bearer
+# openshell:resolve:env:MS_GRAPH_ACCESS_TOKEN`: the OpenShell L7 proxy
+# substitutes the placeholder with a live, gateway-refreshed delegated access
+# token on egress. The bridge never holds a real token.
 
 import asyncio
 import datetime
@@ -24,10 +15,12 @@ import os
 import pathlib
 import re
 import signal
+import ssl
 import sys
 import time
 
-import httpx
+import aiofiles
+import aiohttp
 from markdown_it import MarkdownIt
 
 _md = MarkdownIt().enable("table")
@@ -91,11 +84,38 @@ logging.basicConfig(
 log = logging.getLogger(__name__)
 
 # ── Auth placeholder ─────────────────────────────────────────────────────────
-# Sentinel swapped by the credential sidecar before the request reaches Graph.
-MS_GRAPH_TOKEN_PLACEHOLDER = "MS_GRAPH_TOKEN_PLACEHOLDER_OUTLOOK"
+# Send the CANONICAL (unscoped) OpenShell placeholder, NOT the value OpenShell
+# injects into MS_GRAPH_ACCESS_TOKEN. OpenShell injects a *revision-pinned*
+# placeholder (`openshell:resolve:env:v<rev>_MS_GRAPH_ACCESS_TOKEN`) fixed at
+# process-start and never mutates a running process's env afterward — see the
+# OpenShell docs, sandboxes/providers-v2.mdx "Runtime Limitations": "already-
+# running processes keep the environment they started with ... restart that
+# process". So for this long-running poller, once the gateway's OAuth refresh
+# rotates the token the pinned revision's value expires and the L7 proxy fails
+# closed (same doc: "stale placeholders fail closed") — every Graph call then
+# dies with ServerDisconnectedError ~1h in, until the sandbox is recreated.
+#
+# Re-reading os.environ does NOT help: the env holds only a placeholder string
+# (never a token), frozen at process spawn, so it returns the same pinned
+# revision forever. The token is substituted at the proxy per request, so the
+# only lever is WHICH placeholder we emit. `openshell:resolve:env:KEY` is the
+# documented canonical/stable form (OpenShell docs: reference/policy-schema.mdx,
+# sandboxes/policies.mdx) and the proxy resolves it to the CURRENT refreshed
+# token every request (kept fresh on each sandbox poll). It's the same floating
+# form this repo already uses for the ATIF bearer (AWS_SESSION_TOKEN, see
+# agents/hermes/start.sh).
+#
+# Do NOT change this back to os.environ.get("MS_GRAPH_ACCESS_TOKEN", ...).
+MS_GRAPH_ACCESS_TOKEN = "openshell:resolve:env:MS_GRAPH_ACCESS_TOKEN"
 
 # ── Mailbox config ───────────────────────────────────────────────────────────
-# OpenShell provider placeholder — the L7 proxy rewrites it at egress.
+# OUTLOOK_TARGET_MAILBOX / OUTLOOK_REPLY_TO are non-secret per-user config,
+# injected at sandbox-create time via `-- env` and read from os.environ below.
+# Unlike MS_GRAPH_ACCESS_TOKEN above (a real credential the L7 proxy substitutes
+# at egress), these are NOT proxy-rewritten — even though the mailbox lands in
+# the Graph URL path, it is not a provider credential. The `openshell:resolve:`
+# string is only a sentinel for the unconfigured case: the helpers below detect
+# it and fall back to /me (mailbox) or the job's `to` field (reply-to).
 # Omit OUTLOOK_TARGET_MAILBOX to use /me (the authenticated account's inbox).
 _TARGET_MAILBOX = "openshell:resolve:env:OUTLOOK_TARGET_MAILBOX"
 # OUTLOOK_REPLY_TO: address used as the recipient for outbound scheduled-job
@@ -119,24 +139,11 @@ def _reply_to_address() -> str | None:
         return None
     return raw
 
-# ── Graph API base URL ───────────────────────────────────────────────────────
-# When MS_GRAPH_SIDECAR_URL is set (e.g. http://127.0.0.1:8766), all Graph API
-# requests go to the credential sidecar over plain HTTP on loopback. The sidecar
-# injects the real bearer token and forwards to graph.microsoft.com over HTTPS.
-# Without it, requests go directly to graph.microsoft.com (testing only).
-_MS_GRAPH_SIDECAR_URL = os.environ.get("MS_GRAPH_SIDECAR_URL", "").rstrip("/")
-# GRAPH_BASE always ends with /v1.0 — sidecar URL is the scheme+host only.
-# Requests arrive at the sidecar as /v1.0/... paths; it forwards them to
-# https://graph.microsoft.com with the path unchanged.
-GRAPH_BASE = (f"{_MS_GRAPH_SIDECAR_URL}/v1.0" if _MS_GRAPH_SIDECAR_URL
-              else "https://graph.microsoft.com/v1.0")
+GRAPH_BASE = "https://graph.microsoft.com/v1.0"
 
 
 def _graph_url(path_or_url: str) -> str:
-    """Resolve a relative path or absolute Graph URL, routing through the sidecar."""
-    if path_or_url.startswith("https://graph.microsoft.com/v1.0") and _MS_GRAPH_SIDECAR_URL:
-        # Rewrite delta links (absolute URLs from Graph responses) to go via sidecar
-        return path_or_url.replace("https://graph.microsoft.com/v1.0", GRAPH_BASE, 1)
+    """Resolve a relative path or absolute Graph URL."""
     if path_or_url.startswith("http"):
         return path_or_url
     return f"{GRAPH_BASE}/{path_or_url.lstrip('/')}"
@@ -165,28 +172,40 @@ SENDER_POLL_INTERVAL = 30
 _DELTA_LINK_FILE = pathlib.Path(HERMES_HOME) / "outlook" / "delta-link.json"
 
 
-def _load_delta_link() -> str | None:
+async def _load_delta_link() -> str | None:
     try:
-        return json.loads(_DELTA_LINK_FILE.read_text())["delta_link"]
+        async with aiofiles.open(_DELTA_LINK_FILE) as f:
+            return json.loads(await f.read())["delta_link"]
     except (FileNotFoundError, KeyError, json.JSONDecodeError):
         return None
 
 
-def _save_delta_link(link: str) -> None:
+async def _save_delta_link(link: str) -> None:
     try:
-        _DELTA_LINK_FILE.parent.mkdir(parents=True, exist_ok=True)
-        _DELTA_LINK_FILE.write_text(json.dumps({"delta_link": link}))
+        _DELTA_LINK_FILE.parent.mkdir(parents=True, exist_ok=True)  # single syscall, wrapping overhead would dominate
+        async with aiofiles.open(_DELTA_LINK_FILE, "w") as f:
+            await f.write(json.dumps({"delta_link": link}))
     except OSError:
         log.warning("Could not persist delta link to %s", _DELTA_LINK_FILE)
 
 
 # ── Module-level state ───────────────────────────────────────────────────────
-_client: httpx.AsyncClient | None = None
+_client: aiohttp.ClientSession | None = None
 _delta_link: str | None = None
 _consecutive_empty: int = 0
 ALLOWED_SENDERS: set[str] = set()
 _in_flight: set[str] = set()
 _sem = asyncio.Semaphore(MAX_CONCURRENT_MESSAGES)
+
+# create_task returns a weakref; without a strong ref the GC can drop in-flight tasks.
+_background_tasks: set[asyncio.Task] = set()
+
+
+def _spawn(coro) -> asyncio.Task:
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 # ── Startup health check ─────────────────────────────────────────────────────
@@ -194,11 +213,11 @@ _sem = asyncio.Semaphore(MAX_CONCURRENT_MESSAGES)
 async def wait_for_hermes() -> None:
     for attempt in range(HEALTH_MAX_RETRIES):
         try:
-            r = await _client.get(HEALTH_URL, timeout=5)
-            if r.status_code == 200:
-                log.info("Hermes gateway is healthy")
-                return
-        except httpx.RequestError:
+            async with _client.get(HEALTH_URL, timeout=aiohttp.ClientTimeout(total=5)) as r:
+                if r.status == 200:
+                    log.info("Hermes gateway is healthy")
+                    return
+        except aiohttp.ClientError:
             pass
         log.info("Waiting for Hermes gateway (attempt %d/%d)…", attempt + 1, HEALTH_MAX_RETRIES)
         await asyncio.sleep(HEALTH_RETRY_SECONDS)
@@ -211,36 +230,39 @@ async def wait_for_hermes() -> None:
 async def _graph_request(method: str, path_or_url: str, **kwargs) -> dict | None:
     url = _graph_url(path_or_url)
     headers = {
-        "Authorization": f"Bearer {MS_GRAPH_TOKEN_PLACEHOLDER}",
+        "Authorization": f"Bearer {MS_GRAPH_ACCESS_TOKEN}",
         **kwargs.pop("headers", {}),
     }
-    resp = await getattr(_client, method)(url, headers=headers, **kwargs)
-
-    if resp.status_code == 429:
-        retry_after = int(resp.headers.get("Retry-After", 60))
-        log.warning("Graph API rate limited — retrying after %ds", retry_after)
-        await asyncio.sleep(retry_after)
-        resp = await getattr(_client, method)(url, headers=headers, **kwargs)
-
-    resp.raise_for_status()
-    return resp.json() if resp.content else None
+    for attempt in range(2):
+        async with _client.request(method, url, headers=headers, **kwargs) as resp:
+            if resp.status == 429 and attempt == 0:
+                retry_after = int(resp.headers.get("Retry-After", 60))
+                log.warning("Graph API rate limited — retrying after %ds", retry_after)
+                await asyncio.sleep(retry_after)
+                continue
+            resp.raise_for_status()
+            body = await resp.read()
+            return await resp.json() if body else None
+    return None  # unreachable; loop only exits via early return
 
 
 async def graph_get(path_or_url: str) -> dict:
-    return await _graph_request("get", path_or_url, timeout=15)
+    return await _graph_request("get", path_or_url, timeout=aiohttp.ClientTimeout(total=15))
 
 
 async def graph_post(path_or_url: str, payload: dict) -> None:
     await _graph_request(
         "post", path_or_url,
-        json=payload, headers={"Content-Type": "application/json"}, timeout=15,
+        json=payload, headers={"Content-Type": "application/json"},
+        timeout=aiohttp.ClientTimeout(total=15),
     )
 
 
 async def graph_patch(path_or_url: str, payload: dict) -> None:
     await _graph_request(
         "patch", path_or_url,
-        json=payload, headers={"Content-Type": "application/json"}, timeout=10,
+        json=payload, headers={"Content-Type": "application/json"},
+        timeout=aiohttp.ClientTimeout(total=10),
     )
 
 
@@ -286,20 +308,20 @@ async def initialize_allowed_senders(shutdown: asyncio.Event) -> set[str]:
     while not shutdown.is_set():
         try:
             return await resolve_allowed_senders()
-        except httpx.RemoteProtocolError:
+        except aiohttp.ServerDisconnectedError:
             last_error = sys.exc_info()[1]
             log.warning(
                 "Outlook bridge bootstrap blocked by proxy. "
                 "Retrying in %ds; resolves once policy presets finish loading.",
                 BOOTSTRAP_RETRY_SECONDS,
             )
-        except httpx.HTTPStatusError as exc:
+        except aiohttp.ClientResponseError as exc:
             last_error = exc
             log.warning(
                 "Graph request returned HTTP %d. Retrying in %ds.",
-                exc.response.status_code, BOOTSTRAP_RETRY_SECONDS,
+                exc.status, BOOTSTRAP_RETRY_SECONDS,
             )
-        except httpx.RequestError as exc:
+        except aiohttp.ClientError as exc:
             last_error = exc
             log.warning(
                 "Bridge bootstrap request failed (%s). Retrying in %ds.",
@@ -321,15 +343,16 @@ async def initialize_allowed_senders(shutdown: asyncio.Event) -> set[str]:
 
 async def ask_hermes(prompt: str) -> tuple[str | None, str | None]:
     try:
-        resp = await _client.post(
+        async with _client.post(
             HERMES_URL,
             json={"model": "hermes-agent", "messages": [{"role": "user", "content": prompt}]},
             headers={"Authorization": f"Bearer {HERMES_API_KEY}"},
-            timeout=1200,
-        )
-        resp.raise_for_status()
-        session_id = resp.headers.get("X-Hermes-Session-Id")
-        return resp.json()["choices"][0]["message"]["content"], session_id
+            timeout=aiohttp.ClientTimeout(total=1200),
+        ) as resp:
+            resp.raise_for_status()
+            session_id = resp.headers.get("X-Hermes-Session-Id")
+            payload = await resp.json()
+            return payload["choices"][0]["message"]["content"], session_id
     except Exception:
         log.exception("Error calling Hermes API")
         return None, None
@@ -349,9 +372,9 @@ async def poll_inbox() -> int:
     messages: list[dict] = []
     try:
         data = await graph_get(path)
-    except httpx.HTTPStatusError as exc:
-        if exc.response.status_code in (400, 410):
-            log.warning("Delta link expired (status %d) — resetting state", exc.response.status_code)
+    except aiohttp.ClientResponseError as exc:
+        if exc.status in (400, 410):
+            log.warning("Delta link expired (status %d) — resetting state", exc.status)
             _delta_link = None
             return 0
         raise
@@ -368,11 +391,11 @@ async def poll_inbox() -> int:
 
     if dl := data.get("@odata.deltaLink"):
         _delta_link = dl
-        _save_delta_link(dl)
+        await _save_delta_link(dl)
 
     new_messages = [m for m in messages if m["id"] not in _in_flight]
     for msg in new_messages:
-        asyncio.create_task(_handle_message_guarded(msg))
+        _spawn(_handle_message_guarded(msg))
 
     return len(new_messages)
 
@@ -451,13 +474,13 @@ async def _poll_loop(shutdown: asyncio.Event) -> None:
 
 # ── Scheduled jobs ───────────────────────────────────────────────────────────
 
-def _load_jobs() -> list[dict]:
-    if not os.path.exists(JOBS_FILE):
+async def _load_jobs() -> list[dict]:
+    if not os.path.exists(JOBS_FILE):  # single syscall, wrapping overhead would dominate
         log.info("No jobs file at %s — scheduled jobs disabled", JOBS_FILE)
         return []
     try:
-        with open(JOBS_FILE) as f:
-            jobs = json.load(f)
+        async with aiofiles.open(JOBS_FILE) as f:
+            jobs = json.loads(await f.read())
         for job in jobs:
             log.info("Loaded job '%s' at %s daily", job.get("name", "?"), job.get("time", "?"))
         return jobs
@@ -479,7 +502,7 @@ async def _job_loop(jobs: list[dict], shutdown: asyncio.Event) -> None:
             for job in jobs:
                 if job.get("time") == time_str and not job.get("_fired_today"):
                     job["_fired_today"] = True
-                    asyncio.create_task(_run_job(job))
+                    _spawn(_run_job(job))
         except Exception:
             log.exception("Error in job loop tick")
         try:
@@ -530,17 +553,24 @@ async def _async_main() -> None:
     for sig in (signal.SIGTERM, signal.SIGINT):
         loop.add_signal_handler(sig, lambda: (log.info("Shutdown signal received"), shutdown.set()))
 
-    async with httpx.AsyncClient() as client:
+    # Reject any peer that can't do TLS 1.3 — modern peer set, fail loud on degradation.
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.minimum_version = ssl.TLSVersion.TLSv1_3
+    # trust_env=True so HTTPS_PROXY (OpenShell L7) is honored; aiohttp ignores it by default.
+    async with aiohttp.ClientSession(
+        trust_env=True,
+        connector=aiohttp.TCPConnector(ssl=ssl_ctx),
+    ) as client:
         _client = client
         await wait_for_hermes()
 
         # Restore delta link from previous run — avoids re-processing old mail
-        _delta_link = _load_delta_link()
+        _delta_link = await _load_delta_link()
         if _delta_link:
             log.info("Restored delta link from %s", _DELTA_LINK_FILE)
 
         ALLOWED_SENDERS = await initialize_allowed_senders(shutdown)
-        jobs = _load_jobs()
+        jobs = await _load_jobs()
         log.info(
             "Bridge ready — polling inbox (%ds active / %ds quiet)",
             MIN_POLL_INTERVAL, MAX_POLL_INTERVAL,

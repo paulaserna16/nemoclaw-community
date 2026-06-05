@@ -5,19 +5,19 @@
 # Tear down everything brought up by the phase scripts.
 #
 # Default scope: the per-sandbox state — sandbox itself + the providers
-# scoped to it. Host services from 00-host-services.sh (phoenix, token
-# manager, postgres, ETLs, postgrest) keep running, since they're
-# typically long-lived across multiple bring-ups.
+# scoped to it. Host services from 00-host-services.sh (phoenix, postgres,
+# github-etl, forums-etl, postgrest, plus minio + atif-export-relay when
+# ATIF_EXPORT_MODE=relay) keep running, since they're typically
+# long-lived across multiple bring-ups.
 #
 # Opt-in flags (mutually exclusive):
-#   --stop-host-services    also stop the extras stack (phoenix, token
-#                            manager, postgres, ETLs, postgrest); volumes
-#                            preserved.
+#   --stop-host-services    also stop the extras stack (phoenix, postgres,
+#                            ETLs, postgrest, and storage if enabled);
+#                            volumes preserved.
 #   --purge-host-services   also stop the extras stack AND remove its
-#                            named volumes (token-cache,
-#                            source-etls-postgres-data, github-etl-state).
-#                            DESTRUCTIVE: requires Outlook re-auth via
-#                            authenticate.sh and forces ETL re-scrape.
+#                            named volumes (source-etls-postgres-data,
+#                            github-etl-state). DESTRUCTIVE: forces ETL
+#                            re-scrape on next bring-up.
 #
 # Gateway is never destroyed automatically — run
 #   $ openshell gateway destroy --name <gateway>
@@ -44,8 +44,7 @@ Usage: $(basename "$0") [--stop-host-services | --purge-host-services]
                            Host services keep running.
   --stop-host-services     Also stop host services (volumes preserved).
   --purge-host-services    Also stop host services AND remove named volumes.
-                           DESTRUCTIVE: requires Outlook re-auth via
-                           authenticate.sh and forces ETL re-scrape.
+                           DESTRUCTIVE: forces ETL re-scrape on next bring-up.
 
 To remove the shared compatible-endpoint inference provider, run
 'openshell provider delete compatible-endpoint' directly.
@@ -77,10 +76,10 @@ echo "Deleting sandbox $SANDBOX_NAME (if present)"
 openshell sandbox delete "$SANDBOX_NAME" 2>/dev/null || true
 
 echo "Deleting per-sandbox providers"
-openshell provider delete "$SANDBOX_NAME-outlook"      2>/dev/null || true
-openshell provider delete "$SANDBOX_NAME-github"       2>/dev/null || true
-openshell provider delete "$SANDBOX_NAME-slack-bridge" 2>/dev/null || true
-openshell provider delete "$SANDBOX_NAME-slack-app"    2>/dev/null || true
+openshell provider delete "$SANDBOX_NAME-outlook"           2>/dev/null || true
+openshell provider delete "$SANDBOX_NAME-github"            2>/dev/null || true
+openshell provider delete "$SANDBOX_NAME-slack"             2>/dev/null || true
+openshell provider delete "$SANDBOX_NAME-atif-export-relay" 2>/dev/null || true
 
 case "$stop_mode" in
   stop)

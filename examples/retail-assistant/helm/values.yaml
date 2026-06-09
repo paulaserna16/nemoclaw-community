@@ -1,0 +1,53 @@
+workspace:
+    endpoint: "172.16.0.221:8600"
+    token: "none"
+    model: "Qwen/Qwen3-32B"
+    agent_name: "protopia-retail-demo-assistant"
+    image: "node:22"
+
+dind:
+    # DNS servers for the DinD daemon (must return IPv4 A records)
+    dns1: "8.8.8.8"
+    dns2: "8.8.4.4"
+    # DinD image
+    image: "docker:24-dind"
+
+telegram:
+    enabled: true
+    botToken: "8771772365:AAHnk1w32jISFZNNN4C8FAUx3266Ar07aFc"
+    allowedUserIds: "8667894990,560708142,7034798636"  # comma-separated list of Telegram user IDs allowed to interact with the bot
+
+openclaw:
+    streamingMode: "partial"   # partial (token-by-token) or full (wait for complete response)
+    toolProgress: "false"      # show tool-call progress indicators in Telegram: true / false
+    maxTokens: "8192"          # max output tokens per model response, 4192 by default from Nemoclaw
+
+
+telegramAuth:
+  - telegramId: "8667894990"
+    email: "paula.serna@araz.es"
+  - telegramId: "560708142"
+    email: "sergio.donis@araz.es"
+  - telegramId: "7034798636"
+    email: "raffaele.tarantino@araz.es"
+
+ingress:
+    enabled: false
+    host: ""
+    annotations: {}
+
+postgres:
+    enabled: true
+    image: "postgres:17.3"
+    user: "admin"
+    password: "admin"
+    database: "retail"
+    storageSize: "10Gi"
+    storageClass: "nfs-client"
+    seedEnabled: true        
+
+retailApi:
+    enabled: true
+    image: "paulaserna/retail-api:k8s-fast"
+    port: 8000
+    jwtSecret: "change-me-in-production"

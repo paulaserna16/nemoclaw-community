@@ -1,0 +1,13 @@
+{{- if .Values.postgres.enabled }}
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: "{{ .Release.Name }}-postgres-init"
+  namespace: "{{ .Release.Namespace }}"
+  labels:
+    {{- include "app.labels" . | nindent 4 }}
+data:
+  init.sql: |
+{{ .Files.Get "files/retail_database/init.sql" | indent 4 }}
+{{- end }}

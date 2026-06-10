@@ -1,6 +1,6 @@
 # NemoClaw Retail Demo
 
-NemoClaw is an AI-powered retail management assistant that lets store employees interact with company data through natural conversation - no dashboards, no SQL, no training required. Users connect via Telegram and ask questions or trigger operations naturally: check inventory, request stock transfers, query sales trends.
+This NemoClaw demo provides an AI-powered retail management assistant that lets store employees interact with company data through natural conversation - no dashboards, no SQL, no training required. Users connect via Telegram and ask questions or trigger operations naturally: check inventory, request stock transfers, query sales trends.
 
 Built on the **NVIDIA NemoClaw open-source agentic framework**, the assistant is shaped by a custom identity layer (AGENTS.md · SOUL.md · USER.md) and a retail-specific skill set. All operations run inside a sandboxed environment. Authentication is Telegram-native: each user is automatically mapped to their role and store via the `TelegramAuth` table - no passwords involved.
 
@@ -66,7 +66,7 @@ graph TD
     style SOCAT fill:#e8f5e9,stroke:#00b09b,stroke-width:1px,color:#333
 ```
 
-In both deployments, the agent runs inside an **OpenShell sandbox** — an isolated container with a restricted network namespace. Exec-tool child processes can only reach `10.200.0.1` (veth bridge), which is why a Python TCP relay forwards API calls from inside the sandbox to the workspace's socat proxy.
+In both deployments, the agent runs inside an **OpenShell sandbox** — an isolated runtime that provides a restricted network, restricted file access, and other isolations. Exec-tool child processes can only reach `10.200.0.1` (veth bridge), which is why a Python TCP relay forwards API calls from inside the sandbox to the workspace's socat proxy.
 
 ## Prerequisites
 

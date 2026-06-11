@@ -1,5 +1,5 @@
 workspace:
-    openaiBaseUrl: "http://localhost:8000/v1"
+    openaiBaseUrl: "http://ip:port/v1"
     socatInferencePort: 8000
     token: "none"
     model: "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-FP8"
@@ -15,8 +15,8 @@ dind:
 
 telegram:
     enabled: true
-    botToken: "8975069740:AAEB7GQmqbQ5EUkvIV5DM6WkLsk-uXMVt44"
-    allowedUserIds: "8667894990,560708142"  # comma-separated list of Telegram user IDs allowed to interact with the bot
+    botToken: ""
+    allowedUserIds: "<user_id1>,<user_id2>"  # comma-separated list of Telegram user IDs allowed to interact with the bot
 
 openclaw:
     streamingMode: "partial"   # partial (token-by-token) or full (wait for complete response)
@@ -25,10 +25,10 @@ openclaw:
 
 
 telegramAuth:
-  - telegramId: "8667894990"
-    email: "paula.serna@araz.es"
-  - telegramId: "560708142"
-    email: "sergio.donis@araz.es"
+  - telegramId: ""
+    email: ""
+  - telegramId: ""
+    email: ""
 
 ingress:
     enabled: false
@@ -42,7 +42,7 @@ postgres:
     password: "admin"
     database: "retail"
     storageSize: "10Gi"
-    storageClass: "nfs-client"
+    storageClass: ""
     seedEnabled: true        
 
 retailApi:
